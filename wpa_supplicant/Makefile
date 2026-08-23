@@ -2067,6 +2067,11 @@ wpa_supplicant: $(BCHECK) $(OBJS) $(EXTRA_progs)
 	$(Q)$(LDO) $(LDFLAGS) -o wpa_supplicant $(OBJS) $(LIBS) $(EXTRALIBS)
 	@$(E) "  LD " $@
 
+libwpa_supplicant.a: $(BCHECK) $(OBJS) $(EXTRA_progs)
+	$(Q)rm -f $@
+	$(Q)$(AR) crs $@ $?
+	@$(E) "  AR " $@
+
 _OBJS_VAR := OBJS_t
 include ../src/objs.mk
 eapol_test: $(OBJS_t)
