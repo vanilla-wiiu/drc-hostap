@@ -1,6 +1,6 @@
 /*
  * hostapd / Configuration helper functions
- * Copyright (c) 2003-2014, Jouni Malinen <j@w1.fi>
+ * Copyright (c) 2003-2024, Jouni Malinen <j@w1.fi>
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -10,13 +10,18 @@
 
 #include "utils/common.h"
 #include "crypto/sha1.h"
+#include "crypto/tls.h"
 #include "radius/radius_client.h"
 #include "common/ieee802_11_defs.h"
+#include "common/ieee802_1x_defs.h"
 #include "common/eapol_common.h"
+#include "common/dhcp.h"
+#include "common/sae.h"
 #include "eap_common/eap_wsc_common.h"
 #include "eap_server/eap.h"
 #include "wpa_auth.h"
 #include "sta_info.h"
+#include "airtime_policy.h"
 #include "ap_config.h"
 
 
@@ -36,6 +41,10 @@ static void hostapd_config_free_vlan(struct hostapd_bss_config *bss)
 }
 
 
+#ifndef DEFAULT_WPA_DISABLE_EAPOL_KEY_RETRIES
+#define DEFAULT_WPA_DISABLE_EAPOL_KEY_RETRIES 0
+#endif /* DEFAULT_WPA_DISABLE_EAPOL_KEY_RETRIES */
+
 void hostapd_config_defaults_bss(struct hostapd_bss_config *bss)
 {
 	dl_list_init(&bss->anqp_elem);
@@ -45,19 +54,33 @@ void hostapd_config_defaults_bss(struct hostapd_bss_config *bss)
 	bss->logger_syslog = (unsigned int) -1;
 	bss->logger_stdout = (unsigned int) -1;
 
+#ifdef CONFIG_WEP
 	bss->auth_algs = WPA_AUTH_ALG_OPEN | WPA_AUTH_ALG_SHARED;
 
 	bss->wep_rekeying_period = 300;
 	/* use key0 in individual key and key1 in broadcast key */
 	bss->broadcast_key_idx_min = 1;
 	bss->broadcast_key_idx_max = 2;
+#else /* CONFIG_WEP */
+	bss->auth_algs = WPA_AUTH_ALG_OPEN;
+#endif /* CONFIG_WEP */
 	bss->eap_reauth_period = 3600;
 
 	bss->wpa_group_rekey = 600;
 	bss->wpa_gmk_rekey = 86400;
+	bss->wpa_deny_ptk0_rekey = PTK0_REKEY_ALLOW_ALWAYS;
+	bss->wpa_group_update_count = 4;
+	bss->wpa_pairwise_update_count = 4;
+	bss->wpa_disable_eapol_key_retries =
+		DEFAULT_WPA_DISABLE_EAPOL_KEY_RETRIES;
 	bss->wpa_key_mgmt = WPA_KEY_MGMT_PSK;
+#ifdef CONFIG_NO_TKIP
+	bss->wpa_pairwise = WPA_CIPHER_CCMP;
+	bss->wpa_group = WPA_CIPHER_CCMP;
+#else /* CONFIG_NO_TKIP */
 	bss->wpa_pairwise = WPA_CIPHER_TKIP;
 	bss->wpa_group = WPA_CIPHER_TKIP;
+#endif /* CONFIG_NO_TKIP */
 	bss->rsn_pairwise = 0;
 
 	bss->max_num_sta = MAX_STA_COUNT;
@@ -66,18 +89,19 @@ void hostapd_config_defaults_bss(struct hostapd_bss_config *bss)
 
 	bss->radius_server_auth_port = 1812;
 	bss->eap_sim_db_timeout = 1;
+	bss->eap_sim_id = 3;
+	bss->eap_sim_aka_fast_reauth_limit = 1000;
 	bss->ap_max_inactivity = AP_MAX_INACTIVITY;
+	bss->bss_max_idle = 1;
 	bss->eapol_version = EAPOL_VERSION;
 
 	bss->max_listen_interval = 65535;
 
 	bss->pwd_group = 19; /* ECC: GF(p=256) */
 
-#ifdef CONFIG_IEEE80211W
 	bss->assoc_sa_query_max_timeout = 1000;
 	bss->assoc_sa_query_retry_timeout = 201;
 	bss->group_mgmt_cipher = WPA_CIPHER_AES_128_CMAC;
-#endif /* CONFIG_IEEE80211W */
 #ifdef EAP_SERVER_FAST
 	 /* both anonymous and authenticated provisioning */
 	bss->eap_fast_prov = 3;
@@ -88,13 +112,79 @@ void hostapd_config_defaults_bss(struct hostapd_bss_config *bss)
 	/* Set to -1 as defaults depends on HT in setup */
 	bss->wmm_enabled = -1;
 
-#ifdef CONFIG_IEEE80211R
+#ifdef CONFIG_IEEE80211R_AP
 	bss->ft_over_ds = 1;
-#endif /* CONFIG_IEEE80211R */
+	bss->rkh_pos_timeout = 86400;
+	bss->rkh_neg_timeout = 60;
+	bss->rkh_pull_timeout = 1000;
+	bss->rkh_pull_retries = 4;
+	bss->r0_key_lifetime = 1209600;
+#endif /* CONFIG_IEEE80211R_AP */
 
 	bss->radius_das_time_window = 300;
+	bss->radius_require_message_authenticator = 1;
 
-	bss->sae_anti_clogging_threshold = 5;
+	bss->anti_clogging_threshold = 5;
+	bss->sae_sync = 3;
+
+	bss->gas_frag_limit = 1400;
+
+#ifdef CONFIG_FILS
+	dl_list_init(&bss->fils_realms);
+	bss->fils_hlp_wait_time = 30;
+	bss->dhcp_server_port = DHCP_SERVER_PORT;
+	bss->dhcp_relay_port = DHCP_SERVER_PORT;
+	bss->fils_discovery_min_int = 20;
+#endif /* CONFIG_FILS */
+
+	bss->broadcast_deauth = 1;
+
+#ifdef CONFIG_MBO
+	bss->mbo_cell_data_conn_pref = -1;
+#endif /* CONFIG_MBO */
+
+	/* Disable TLS v1.3 by default for now to avoid interoperability issue.
+	 * This can be enabled by default once the implementation has been fully
+	 * completed and tested with other implementations. */
+	bss->tls_flags = TLS_CONN_DISABLE_TLSv1_3;
+
+	bss->max_auth_rounds = 100;
+	bss->max_auth_rounds_short = 50;
+
+	bss->send_probe_response = 1;
+
+#ifdef CONFIG_HS20
+	bss->hs20_release = (HS20_VERSION >> 4) + 1;
+#endif /* CONFIG_HS20 */
+
+#ifdef CONFIG_MACSEC
+	bss->mka_priority = DEFAULT_PRIO_NOT_KEY_SERVER;
+	bss->macsec_port = 1;
+#endif /* CONFIG_MACSEC */
+
+	/* Default to strict CRL checking. */
+	bss->check_crl_strict = 1;
+
+	bss->multi_ap_profile = MULTI_AP_PROFILE_2;
+
+#ifdef CONFIG_TESTING_OPTIONS
+	bss->sae_commit_status = -1;
+	bss->test_assoc_comeback_type = -1;
+	bss->association_response_status_code = -1;
+#endif /* CONFIG_TESTING_OPTIONS */
+
+#ifdef CONFIG_PASN
+	/* comeback after 10 TUs */
+	bss->pasn_comeback_after = 10;
+	bss->pasn_noauth = 1;
+#endif /* CONFIG_PASN */
+	bss->urnm_mfpr_x20 = -1;
+	bss->urnm_mfpr = -1;
+#ifdef CONFIG_ENC_ASSOC
+	bss->assoc_frame_encryption = 0;
+	bss->pmksa_caching_privacy = 0;
+	bss->eap_using_authentication_frames = 0;
+#endif /* CONFIG_ENC_ASSOC */
 }
 
 
@@ -155,9 +245,8 @@ struct hostapd_config * hostapd_config_defaults(void)
 	conf->num_bss = 1;
 
 	conf->beacon_int = 100;
-	conf->rts_threshold = -1; /* use driver default: 2347 */
-	conf->fragm_threshold = -1; /* user driver default: 2346 */
-	conf->send_probe_response = 1;
+	conf->rts_threshold = -2; /* use driver default: 2347 */
+	conf->fragm_threshold = -2; /* user driver default: 2346 */
 	/* Set to invalid value means do not add Power Constraint IE */
 	conf->local_pwr_constraint = -1;
 
@@ -192,6 +281,41 @@ struct hostapd_config * hostapd_config_defaults(void)
 	conf->acs_num_scans = 5;
 #endif /* CONFIG_ACS */
 
+#ifdef CONFIG_IEEE80211AX
+	conf->he_op.he_rts_threshold = HE_OPERATION_RTS_THRESHOLD_MASK >>
+		HE_OPERATION_RTS_THRESHOLD_OFFSET;
+	/* Set default basic MCS/NSS set to single stream MCS 0-7 */
+	conf->he_op.he_basic_mcs_nss_set = 0xfffc;
+	conf->he_op.he_bss_color_disabled = 1;
+	conf->he_op.he_bss_color_partial = 0;
+	conf->he_op.he_bss_color = os_random() % 63 + 1;
+	conf->he_op.he_twt_responder = 1;
+	conf->he_6ghz_max_mpdu = 2;
+	conf->he_6ghz_max_ampdu_len_exp = 7;
+	conf->he_6ghz_rx_ant_pat = 1;
+	conf->he_6ghz_tx_ant_pat = 1;
+	conf->he_6ghz_reg_pwr_type = HE_REG_INFO_6GHZ_AP_TYPE_VLP;
+	conf->reg_def_cli_eirp_psd = -1;
+	conf->reg_sub_cli_eirp_psd = -1;
+	conf->reg_def_cli_eirp = -1;
+#endif /* CONFIG_IEEE80211AX */
+
+	/* The third octet of the country string uses an ASCII space character
+	 * by default to indicate that the regulations encompass all
+	 * environments for the current frequency band in the country. */
+	conf->country[2] = ' ';
+
+	conf->rssi_reject_assoc_rssi = 0;
+	conf->rssi_reject_assoc_timeout = 30;
+
+#ifdef CONFIG_AIRTIME_POLICY
+	conf->airtime_update_interval = AIRTIME_DEFAULT_UPDATE_INTERVAL;
+#endif /* CONFIG_AIRTIME_POLICY */
+
+	hostapd_set_and_check_bw320_offset(conf, 0);
+
+	conf->disable_mcs15_rx = true;
+
 	return conf;
 }
 
@@ -207,6 +331,12 @@ static int hostapd_config_read_wpa_psk(const char *fname,
 {
 	FILE *f;
 	char buf[128], *pos;
+	const char *keyid;
+	char *context;
+	char *context2;
+	char *token;
+	char *name;
+	char *value;
 	int line = 0, ret = 0, len, ok;
 	u8 addr[ETH_ALEN];
 	struct hostapd_wpa_psk *psk;
@@ -221,6 +351,9 @@ static int hostapd_config_read_wpa_psk(const char *fname,
 	}
 
 	while (fgets(buf, sizeof(buf), f)) {
+		int vlan_id = 0;
+		int wps = 0;
+
 		line++;
 
 		if (buf[0] == '#')
@@ -236,9 +369,42 @@ static int hostapd_config_read_wpa_psk(const char *fname,
 		if (buf[0] == '\0')
 			continue;
 
-		if (hwaddr_aton(buf, addr)) {
-			wpa_printf(MSG_ERROR, "Invalid MAC address '%s' on "
-				   "line %d in '%s'", buf, line, fname);
+		context = NULL;
+		keyid = NULL;
+		while ((token = str_token(buf, " ", &context))) {
+			if (!os_strchr(token, '='))
+				break;
+			context2 = NULL;
+			name = str_token(token, "=", &context2);
+			if (!name)
+				break;
+			value = str_token(token, "", &context2);
+			if (!value)
+				value = "";
+			if (!os_strcmp(name, "keyid")) {
+				keyid = value;
+			} else if (!os_strcmp(name, "wps")) {
+				wps = atoi(value);
+			} else if (!os_strcmp(name, "vlanid")) {
+				vlan_id = atoi(value);
+			} else {
+				wpa_printf(MSG_ERROR,
+					   "Unrecognized '%s=%s' on line %d in '%s'",
+					   name, value, line, fname);
+				ret = -1;
+				break;
+			}
+		}
+
+		if (ret == -1)
+			break;
+
+		if (!token)
+			token = "";
+		if (hwaddr_aton(token, addr)) {
+			wpa_printf(MSG_ERROR,
+				   "Invalid MAC address '%s' on line %d in '%s'",
+				   token, line, fname);
 			ret = -1;
 			break;
 		}
@@ -249,37 +415,52 @@ static int hostapd_config_read_wpa_psk(const char *fname,
 			ret = -1;
 			break;
 		}
+		psk->vlan_id = vlan_id;
 		if (is_zero_ether_addr(addr))
 			psk->group = 1;
 		else
 			os_memcpy(psk->addr, addr, ETH_ALEN);
 
-		pos = buf + 17;
-		if (*pos == '\0') {
+		pos = str_token(buf, "", &context);
+		if (!pos) {
 			wpa_printf(MSG_ERROR, "No PSK on line %d in '%s'",
 				   line, fname);
 			os_free(psk);
 			ret = -1;
 			break;
 		}
-		pos++;
 
 		ok = 0;
 		len = os_strlen(pos);
-		if (len == 64 && hexstr2bin(pos, psk->psk, PMK_LEN) == 0)
+		if (len == 2 * PMK_LEN &&
+		    hexstr2bin(pos, psk->psk, PMK_LEN) == 0)
 			ok = 1;
-		else if (len >= 8 && len < 64) {
-			pbkdf2_sha1(pos, ssid->ssid, ssid->ssid_len,
-				    4096, psk->psk, PMK_LEN);
+		else if (len >= 8 && len < 64 &&
+			 pbkdf2_sha1(pos, ssid->ssid, ssid->ssid_len,
+				     4096, psk->psk, PMK_LEN) == 0)
 			ok = 1;
-		}
 		if (!ok) {
-			wpa_printf(MSG_ERROR, "Invalid PSK '%s' on line %d in "
-				   "'%s'", pos, line, fname);
+			wpa_printf(MSG_ERROR,
+				   "Invalid PSK '%s' on line %d in '%s'",
+				   pos, line, fname);
 			os_free(psk);
 			ret = -1;
 			break;
 		}
+
+		if (keyid) {
+			len = os_strlcpy(psk->keyid, keyid, sizeof(psk->keyid));
+			if ((size_t) len >= sizeof(psk->keyid)) {
+				wpa_printf(MSG_ERROR,
+					   "PSK keyid too long on line %d in '%s'",
+					   line, fname);
+				os_free(psk);
+				ret = -1;
+				break;
+			}
+		}
+
+		psk->wps = wps;
 
 		psk->next = ssid->wpa_psk;
 		ssid->wpa_psk = psk;
@@ -303,11 +484,70 @@ static int hostapd_derive_psk(struct hostapd_ssid *ssid)
 	wpa_hexdump_ascii_key(MSG_DEBUG, "PSK (ASCII passphrase)",
 			      (u8 *) ssid->wpa_passphrase,
 			      os_strlen(ssid->wpa_passphrase));
-	pbkdf2_sha1(ssid->wpa_passphrase,
-		    ssid->ssid, ssid->ssid_len,
-		    4096, ssid->wpa_psk->psk, PMK_LEN);
+	if (pbkdf2_sha1(ssid->wpa_passphrase,
+			ssid->ssid, ssid->ssid_len,
+			4096, ssid->wpa_psk->psk, PMK_LEN) != 0) {
+		wpa_printf(MSG_ERROR, "Error in pbkdf2_sha1()");
+		return -1;
+	}
 	wpa_hexdump_key(MSG_DEBUG, "PSK (from passphrase)",
 			ssid->wpa_psk->psk, PMK_LEN);
+	return 0;
+}
+
+
+int hostapd_setup_sae_pt(struct hostapd_bss_config *conf)
+{
+#ifdef CONFIG_SAE
+	struct hostapd_ssid *ssid = &conf->ssid;
+	struct sae_password_entry *pw;
+	int *groups = conf->sae_groups;
+	int default_groups[] = { 19, 0, 0 };
+
+	if ((conf->sae_pwe == SAE_PWE_HUNT_AND_PECK &&
+	     !hostapd_sae_pw_id_in_use(conf) &&
+	     !wpa_key_mgmt_sae_ext_key(conf->wpa_key_mgmt |
+				       conf->rsn_override_key_mgmt |
+				       conf->rsn_override_key_mgmt_2) &&
+	     !hostapd_sae_pk_in_use(conf)) ||
+	    conf->sae_pwe == SAE_PWE_FORCE_HUNT_AND_PECK ||
+	    !wpa_key_mgmt_sae(conf->wpa_key_mgmt |
+			      conf->rsn_override_key_mgmt |
+			      conf->rsn_override_key_mgmt_2))
+		return 0; /* PT not needed */
+
+	if (!groups) {
+		groups = default_groups;
+		if (wpa_key_mgmt_sae_ext_key(conf->wpa_key_mgmt |
+					     conf->rsn_override_key_mgmt |
+					     conf->rsn_override_key_mgmt_2))
+			default_groups[1] = 20;
+	}
+
+	sae_deinit_pt(ssid->pt);
+	ssid->pt = NULL;
+	if (ssid->wpa_passphrase) {
+		ssid->pt = sae_derive_pt(groups, ssid->ssid, ssid->ssid_len,
+					 (const u8 *) ssid->wpa_passphrase,
+					 os_strlen(ssid->wpa_passphrase),
+					 NULL, 0);
+		if (!ssid->pt)
+			return -1;
+	}
+
+	for (pw = conf->sae_passwords; pw; pw = pw->next) {
+		sae_deinit_pt(pw->pt);
+		pw->pt = sae_derive_pt(groups, ssid->ssid, ssid->ssid_len,
+				       (const u8 *) pw->password,
+				       os_strlen(pw->password),
+				       (const u8 *) pw->identifier,
+				       pw->identifier ?
+				       os_strlen(pw->identifier) : 0);
+		if (!pw->pt)
+			return -1;
+	}
+#endif /* CONFIG_SAE */
+
 	return 0;
 }
 
@@ -315,6 +555,9 @@ static int hostapd_derive_psk(struct hostapd_ssid *ssid)
 int hostapd_setup_wpa_psk(struct hostapd_bss_config *conf)
 {
 	struct hostapd_ssid *ssid = &conf->ssid;
+
+	if (hostapd_setup_sae_pt(conf) < 0)
+		return -1;
 
 	if (ssid->wpa_passphrase != NULL) {
 		if (ssid->wpa_psk != NULL) {
@@ -329,13 +572,7 @@ int hostapd_setup_wpa_psk(struct hostapd_bss_config *conf)
 		ssid->wpa_psk->group = 1;
 	}
 
-	if (ssid->wpa_psk_file) {
-		if (hostapd_config_read_wpa_psk(ssid->wpa_psk_file,
-						&conf->ssid))
-			return -1;
-	}
-
-	return 0;
+	return hostapd_config_read_wpa_psk(ssid->wpa_psk_file, &conf->ssid);
 }
 
 
@@ -346,6 +583,10 @@ static void hostapd_config_free_radius(struct hostapd_radius_server *servers,
 
 	for (i = 0; i < num_servers; i++) {
 		os_free(servers[i].shared_secret);
+		os_free(servers[i].ca_cert);
+		os_free(servers[i].client_cert);
+		os_free(servers[i].private_key);
+		os_free(servers[i].private_key_passwd);
 	}
 	os_free(servers);
 }
@@ -362,7 +603,76 @@ hostapd_config_get_radius_attr(struct hostapd_radius_attr *attr, u8 type)
 }
 
 
-static void hostapd_config_free_radius_attr(struct hostapd_radius_attr *attr)
+struct hostapd_radius_attr * hostapd_parse_radius_attr(const char *value)
+{
+	const char *pos;
+	char syntax;
+	struct hostapd_radius_attr *attr;
+	size_t len;
+
+	attr = os_zalloc(sizeof(*attr));
+	if (!attr)
+		return NULL;
+
+	attr->type = atoi(value);
+
+	pos = os_strchr(value, ':');
+	if (!pos) {
+		attr->val = wpabuf_alloc(1);
+		if (!attr->val) {
+			os_free(attr);
+			return NULL;
+		}
+		wpabuf_put_u8(attr->val, 0);
+		return attr;
+	}
+
+	pos++;
+	if (pos[0] == '\0' || pos[1] != ':') {
+		os_free(attr);
+		return NULL;
+	}
+	syntax = *pos++;
+	pos++;
+
+	switch (syntax) {
+	case 's':
+		attr->val = wpabuf_alloc_copy(pos, os_strlen(pos));
+		break;
+	case 'x':
+		len = os_strlen(pos);
+		if (len & 1)
+			break;
+		len /= 2;
+		attr->val = wpabuf_alloc(len);
+		if (!attr->val)
+			break;
+		if (hexstr2bin(pos, wpabuf_put(attr->val, len), len) < 0) {
+			wpabuf_free(attr->val);
+			os_free(attr);
+			return NULL;
+		}
+		break;
+	case 'd':
+		attr->val = wpabuf_alloc(4);
+		if (attr->val)
+			wpabuf_put_be32(attr->val, atoi(pos));
+		break;
+	default:
+		os_free(attr);
+		return NULL;
+	}
+
+	if (!attr->val) {
+		os_free(attr);
+		return NULL;
+	}
+
+	return attr;
+}
+
+
+void hostapd_config_free_radius_attr(struct hostapd_radius_attr *attr)
 {
 	struct hostapd_radius_attr *prev;
 
@@ -380,10 +690,24 @@ void hostapd_config_free_eap_user(struct hostapd_eap_user *user)
 	hostapd_config_free_radius_attr(user->accept_attr);
 	os_free(user->identity);
 	bin_clear_free(user->password, user->password_len);
+	bin_clear_free(user->salt, user->salt_len);
 	os_free(user);
 }
 
 
+void hostapd_config_free_eap_users(struct hostapd_eap_user *user)
+{
+	struct hostapd_eap_user *prev_user;
+
+	while (user) {
+		prev_user = user;
+		user = user->next;
+		hostapd_config_free_eap_user(prev_user);
+	}
+}
+
+
+#ifdef CONFIG_WEP
 static void hostapd_config_free_wep(struct hostapd_wep_keys *keys)
 {
 	int i;
@@ -392,6 +716,7 @@ static void hostapd_config_free_wep(struct hostapd_wep_keys *keys)
 		keys->key[i] = NULL;
 	}
 }
+#endif /* CONFIG_WEP */
 
 
 void hostapd_config_clear_wpa_psk(struct hostapd_wpa_psk **l)
@@ -407,6 +732,33 @@ void hostapd_config_clear_wpa_psk(struct hostapd_wpa_psk **l)
 }
 
 
+#ifdef CONFIG_IEEE80211R_AP
+
+void hostapd_config_clear_rxkhs(struct hostapd_bss_config *conf)
+{
+	struct ft_remote_r0kh *r0kh, *r0kh_prev;
+	struct ft_remote_r1kh *r1kh, *r1kh_prev;
+
+	r0kh = conf->r0kh_list;
+	conf->r0kh_list = NULL;
+	while (r0kh) {
+		r0kh_prev = r0kh;
+		r0kh = r0kh->next;
+		os_free(r0kh_prev);
+	}
+
+	r1kh = conf->r1kh_list;
+	conf->r1kh_list = NULL;
+	while (r1kh) {
+		r1kh_prev = r1kh;
+		r1kh = r1kh->next;
+		os_free(r1kh_prev);
+	}
+}
+
+#endif /* CONFIG_IEEE80211R_AP */
+
+
 static void hostapd_config_free_anqp_elem(struct hostapd_bss_config *conf)
 {
 	struct anqp_element *elem;
@@ -420,9 +772,63 @@ static void hostapd_config_free_anqp_elem(struct hostapd_bss_config *conf)
 }
 
 
+static void hostapd_config_free_fils_realms(struct hostapd_bss_config *conf)
+{
+#ifdef CONFIG_FILS
+	struct fils_realm *realm;
+
+	while ((realm = dl_list_first(&conf->fils_realms, struct fils_realm,
+				      list))) {
+		dl_list_del(&realm->list);
+		os_free(realm);
+	}
+#endif /* CONFIG_FILS */
+}
+
+
+static void hostapd_config_free_sae_passwords(struct hostapd_bss_config *conf)
+{
+	struct sae_password_entry *pw, *tmp;
+
+	pw = conf->sae_passwords;
+	conf->sae_passwords = NULL;
+	while (pw) {
+		tmp = pw;
+		pw = pw->next;
+		str_clear_free(tmp->password);
+		os_free(tmp->identifier);
+#ifdef CONFIG_SAE
+		sae_deinit_pt(tmp->pt);
+#endif /* CONFIG_SAE */
+#ifdef CONFIG_SAE_PK
+		sae_deinit_pk(tmp->pk);
+#endif /* CONFIG_SAE_PK */
+		os_free(tmp->success_mac);
+		os_free(tmp->fail_mac);
+		os_free(tmp);
+	}
+}
+
+
+#ifdef CONFIG_DPP2
+static void hostapd_dpp_controller_conf_free(struct dpp_controller_conf *conf)
+{
+	struct dpp_controller_conf *prev;
+
+	while (conf) {
+		prev = conf;
+		conf = conf->next;
+		os_free(prev);
+	}
+}
+#endif /* CONFIG_DPP2 */
+
+
 void hostapd_config_free_bss(struct hostapd_bss_config *conf)
 {
-	struct hostapd_eap_user *user, *prev_user;
+#if defined(CONFIG_WPS) || defined(CONFIG_HS20)
+	size_t i;
+#endif
 
 	if (conf == NULL)
 		return;
@@ -431,17 +837,17 @@ void hostapd_config_free_bss(struct hostapd_bss_config *conf)
 
 	str_clear_free(conf->ssid.wpa_passphrase);
 	os_free(conf->ssid.wpa_psk_file);
+#ifdef CONFIG_WEP
 	hostapd_config_free_wep(&conf->ssid.wep);
+#endif /* CONFIG_WEP */
 #ifdef CONFIG_FULL_DYNAMIC_VLAN
 	os_free(conf->ssid.vlan_tagged_interface);
 #endif /* CONFIG_FULL_DYNAMIC_VLAN */
+#ifdef CONFIG_SAE
+	sae_deinit_pt(conf->ssid.pt);
+#endif /* CONFIG_SAE */
 
-	user = conf->eap_user;
-	while (user) {
-		prev_user = user;
-		user = user->next;
-		hostapd_config_free_eap_user(prev_user);
-	}
+	hostapd_config_free_eap_users(conf->eap_user);
 	os_free(conf->eap_user_sqlite);
 
 	os_free(conf->eap_req_id_text);
@@ -454,51 +860,45 @@ void hostapd_config_free_bss(struct hostapd_bss_config *conf)
 					   conf->radius->num_auth_servers);
 		hostapd_config_free_radius(conf->radius->acct_servers,
 					   conf->radius->num_acct_servers);
+		os_free(conf->radius->force_client_dev);
 	}
 	hostapd_config_free_radius_attr(conf->radius_auth_req_attr);
 	hostapd_config_free_radius_attr(conf->radius_acct_req_attr);
+	os_free(conf->radius_req_attr_sqlite);
 	os_free(conf->rsn_preauth_interfaces);
 	os_free(conf->ctrl_interface);
+	os_free(conf->config_id);
 	os_free(conf->ca_cert);
 	os_free(conf->server_cert);
+	os_free(conf->server_cert2);
 	os_free(conf->private_key);
+	os_free(conf->private_key2);
 	os_free(conf->private_key_passwd);
+	os_free(conf->private_key_passwd2);
+	os_free(conf->check_cert_subject);
 	os_free(conf->ocsp_stapling_response);
 	os_free(conf->ocsp_stapling_response_multi);
 	os_free(conf->dh_file);
 	os_free(conf->openssl_ciphers);
+	os_free(conf->openssl_ecdh_curves);
 	os_free(conf->pac_opaque_encr_key);
 	os_free(conf->eap_fast_a_id);
 	os_free(conf->eap_fast_a_id_info);
 	os_free(conf->eap_sim_db);
+	os_free(conf->imsi_privacy_key);
 	os_free(conf->radius_server_clients);
 	os_free(conf->radius);
 	os_free(conf->radius_das_shared_secret);
 	hostapd_config_free_vlan(conf);
 	os_free(conf->time_zone);
+	os_free(conf->supported_rates);
+	os_free(conf->basic_rates);
 
-#ifdef CONFIG_IEEE80211R
-	{
-		struct ft_remote_r0kh *r0kh, *r0kh_prev;
-		struct ft_remote_r1kh *r1kh, *r1kh_prev;
-
-		r0kh = conf->r0kh_list;
-		conf->r0kh_list = NULL;
-		while (r0kh) {
-			r0kh_prev = r0kh;
-			r0kh = r0kh->next;
-			os_free(r0kh_prev);
-		}
-
-		r1kh = conf->r1kh_list;
-		conf->r1kh_list = NULL;
-		while (r1kh) {
-			r1kh_prev = r1kh;
-			r1kh = r1kh->next;
-			os_free(r1kh_prev);
-		}
-	}
-#endif /* CONFIG_IEEE80211R */
+#ifdef CONFIG_IEEE80211R_AP
+	hostapd_config_clear_rxkhs(conf);
+	os_free(conf->rxkh_file);
+	conf->rxkh_file = NULL;
+#endif /* CONFIG_IEEE80211R_AP */
 
 #ifdef CONFIG_WPS
 	os_free(conf->wps_pin_requests);
@@ -511,18 +911,17 @@ void hostapd_config_free_bss(struct hostapd_bss_config *conf)
 	os_free(conf->ap_pin);
 	os_free(conf->extra_cred);
 	os_free(conf->ap_settings);
+	hostapd_config_clear_wpa_psk(&conf->multi_ap_backhaul_ssid.wpa_psk);
+	str_clear_free(conf->multi_ap_backhaul_ssid.wpa_passphrase);
 	os_free(conf->upnp_iface);
 	os_free(conf->friendly_name);
 	os_free(conf->manufacturer_url);
 	os_free(conf->model_description);
 	os_free(conf->model_url);
 	os_free(conf->upc);
-	{
-		unsigned int i;
-
-		for (i = 0; i < MAX_WPS_VENDOR_EXTENSIONS; i++)
-			wpabuf_free(conf->wps_vendor_ext[i]);
-	}
+	for (i = 0; i < MAX_WPS_VENDOR_EXTENSIONS; i++)
+		wpabuf_free(conf->wps_vendor_ext[i]);
+	wpabuf_free(conf->wps_application_ext);
 	wpabuf_free(conf->wps_nfc_dh_pubkey);
 	wpabuf_free(conf->wps_nfc_dh_privkey);
 	wpabuf_free(conf->wps_nfc_dev_pw);
@@ -530,6 +929,7 @@ void hostapd_config_free_bss(struct hostapd_bss_config *conf)
 
 	os_free(conf->roaming_consortium);
 	os_free(conf->venue_name);
+	os_free(conf->venue_url);
 	os_free(conf->nai_realm_data);
 	os_free(conf->network_auth_type);
 	os_free(conf->anqp_3gpp_cell_net);
@@ -545,31 +945,17 @@ void hostapd_config_free_bss(struct hostapd_bss_config *conf)
 	os_free(conf->hs20_wan_metrics);
 	os_free(conf->hs20_connection_capability);
 	os_free(conf->hs20_operating_class);
-	os_free(conf->hs20_icons);
-	if (conf->hs20_osu_providers) {
-		size_t i;
-		for (i = 0; i < conf->hs20_osu_providers_count; i++) {
-			struct hs20_osu_provider *p;
-			size_t j;
-			p = &conf->hs20_osu_providers[i];
-			os_free(p->friendly_name);
-			os_free(p->server_uri);
-			os_free(p->method_list);
-			for (j = 0; j < p->icons_count; j++)
-				os_free(p->icons[j]);
-			os_free(p->icons);
-			os_free(p->osu_nai);
-			os_free(p->service_desc);
-		}
-		os_free(conf->hs20_osu_providers);
-	}
-	os_free(conf->subscr_remediation_url);
+	os_free(conf->t_c_filename);
+	os_free(conf->t_c_server_url);
 #endif /* CONFIG_HS20 */
 
 	wpabuf_free(conf->vendor_elements);
 	wpabuf_free(conf->assocresp_elements);
 
 	os_free(conf->sae_groups);
+#ifdef CONFIG_OWE
+	os_free(conf->owe_groups);
+#endif /* CONFIG_OWE */
 
 	os_free(conf->wowlan_triggers);
 
@@ -577,13 +963,84 @@ void hostapd_config_free_bss(struct hostapd_bss_config *conf)
 
 #ifdef CONFIG_TESTING_OPTIONS
 	wpabuf_free(conf->own_ie_override);
+	wpabuf_free(conf->rsne_override);
+	wpabuf_free(conf->rsnoe_override);
+	wpabuf_free(conf->rsno2e_override);
+	wpabuf_free(conf->rsnxe_override);
+	wpabuf_free(conf->rsnxoe_override);
+	wpabuf_free(conf->sae_commit_override);
+	wpabuf_free(conf->rsne_override_eapol);
+	wpabuf_free(conf->rsnxe_override_eapol);
+	wpabuf_free(conf->rsne_override_ft);
+	wpabuf_free(conf->rsnxe_override_ft);
+	wpabuf_free(conf->gtk_rsc_override);
+	wpabuf_free(conf->igtk_rsc_override);
+	wpabuf_free(conf->eapol_m1_elements);
+	wpabuf_free(conf->eapol_m3_elements);
+	wpabuf_free(conf->presp_elements);
 #endif /* CONFIG_TESTING_OPTIONS */
 
 	os_free(conf->no_probe_resp_if_seen_on);
 	os_free(conf->no_auth_if_seen_on);
 
+	hostapd_config_free_fils_realms(conf);
+
+#ifdef CONFIG_DPP
+	os_free(conf->dpp_name);
+	os_free(conf->dpp_mud_url);
+	os_free(conf->dpp_extra_conf_req_name);
+	os_free(conf->dpp_extra_conf_req_value);
+	os_free(conf->dpp_connector);
+	wpabuf_free(conf->dpp_netaccesskey);
+	wpabuf_free(conf->dpp_csign);
+#ifdef CONFIG_DPP2
+	hostapd_dpp_controller_conf_free(conf->dpp_controller);
+#endif /* CONFIG_DPP2 */
+#endif /* CONFIG_DPP */
+
+	hostapd_config_free_sae_passwords(conf);
+
+#ifdef CONFIG_AIRTIME_POLICY
+	{
+		struct airtime_sta_weight *wt, *wt_prev;
+
+		wt = conf->airtime_weight_list;
+		conf->airtime_weight_list = NULL;
+		while (wt) {
+			wt_prev = wt;
+			wt = wt->next;
+			os_free(wt_prev);
+		}
+	}
+#endif /* CONFIG_AIRTIME_POLICY */
+
+#ifdef CONFIG_PASN
+	os_free(conf->pasn_groups);
+#ifdef CONFIG_TESTING_OPTIONS
+	os_free(conf->pasn_test_groups);
+#endif /* CONFIG_TESTING_OPTIONS */
+#endif /* CONFIG_PASN */
+
+	wpabuf_clear_free(conf->sae_pw_id_key);
+
 	os_free(conf);
 }
+
+
+#ifdef CONFIG_AFC
+void hostapd_config_free_afc_cert_ids(struct hostapd_config *conf)
+{
+	unsigned int i;
+
+	for (i = 0; i < conf->afc.n_cert_ids; i++) {
+		os_free(conf->afc.cert_ids[i].ruleset);
+		os_free(conf->afc.cert_ids[i].id);
+	}
+	os_free(conf->afc.cert_ids);
+	conf->afc.cert_ids = NULL;
+	conf->afc.n_cert_ids = 0;
+}
+#endif /* CONFIG_AFC */
 
 
 /**
@@ -600,15 +1057,26 @@ void hostapd_config_free(struct hostapd_config *conf)
 	for (i = 0; i < conf->num_bss; i++)
 		hostapd_config_free_bss(conf->bss[i]);
 	os_free(conf->bss);
-	os_free(conf->supported_rates);
-	os_free(conf->basic_rates);
 	os_free(conf->acs_ch_list.range);
+	os_free(conf->acs_freq_list.range);
 	os_free(conf->driver_params);
 #ifdef CONFIG_ACS
 	os_free(conf->acs_chan_bias);
 #endif /* CONFIG_ACS */
 	wpabuf_free(conf->lci);
 	wpabuf_free(conf->civic);
+#ifdef CONFIG_AFC
+	os_free(conf->afc.socket);
+	os_free(conf->afc.request.version);
+	os_free(conf->afc.request.sn);
+	hostapd_config_free_afc_cert_ids(conf);
+	os_free(conf->afc.cert_ids);
+	os_free(conf->afc.location.height_type);
+	os_free(conf->afc.location.linear_polygon_data);
+	os_free(conf->afc.location.radial_polygon_data);
+	os_free(conf->afc.freqs.range);
+	os_free(conf->afc.op_class);
+#endif /* CONFIG_AFC */
 
 	os_free(conf);
 }
@@ -645,21 +1113,6 @@ int hostapd_maclist_found(struct mac_acl_entry *list, int num_entries,
 		else
 			end = middle - 1;
 	}
-
-	return 0;
-}
-
-
-int hostapd_rate_found(int *list, int rate)
-{
-	int i;
-
-	if (list == NULL)
-		return 0;
-
-	for (i = 0; list[i] >= 0; i++)
-		if (list[i] == rate)
-			return 1;
 
 	return 0;
 }
@@ -706,10 +1159,13 @@ const char * hostapd_get_vlan_id_ifname(struct hostapd_vlan *vlan, int vlan_id)
 
 const u8 * hostapd_get_psk(const struct hostapd_bss_config *conf,
 			   const u8 *addr, const u8 *p2p_dev_addr,
-			   const u8 *prev_psk)
+			   const u8 *prev_psk, int *vlan_id)
 {
 	struct hostapd_wpa_psk *psk;
 	int next_ok = prev_psk == NULL;
+
+	if (vlan_id)
+		*vlan_id = 0;
 
 	if (p2p_dev_addr && !is_zero_ether_addr(p2p_dev_addr)) {
 		wpa_printf(MSG_DEBUG, "Searching a PSK for " MACSTR
@@ -725,11 +1181,13 @@ const u8 * hostapd_get_psk(const struct hostapd_bss_config *conf,
 	for (psk = conf->ssid.wpa_psk; psk != NULL; psk = psk->next) {
 		if (next_ok &&
 		    (psk->group ||
-		     (addr && os_memcmp(psk->addr, addr, ETH_ALEN) == 0) ||
+		     (addr && ether_addr_equal(psk->addr, addr)) ||
 		     (!addr && p2p_dev_addr &&
-		      os_memcmp(psk->p2p_dev_addr, p2p_dev_addr, ETH_ALEN) ==
-		      0)))
+		      ether_addr_equal(psk->p2p_dev_addr, p2p_dev_addr)))) {
+			if (vlan_id)
+				*vlan_id = psk->vlan_id;
 			return psk->psk;
+		}
 
 		if (psk->psk == prev_psk)
 			next_ok = 1;
@@ -739,10 +1197,93 @@ const u8 * hostapd_get_psk(const struct hostapd_bss_config *conf,
 }
 
 
+#ifdef CONFIG_SAE_PK
+static bool hostapd_sae_pk_password_without_pk(struct hostapd_bss_config *bss)
+{
+	struct sae_password_entry *pw;
+	bool res = false;
+
+	if (bss->ssid.wpa_passphrase &&
+#ifdef CONFIG_TESTING_OPTIONS
+	    !bss->sae_pk_password_check_skip &&
+#endif /* CONFIG_TESTING_OPTIONS */
+	    sae_pk_valid_password(bss->ssid.wpa_passphrase))
+		res = true;
+
+	for (pw = bss->sae_passwords; pw; pw = pw->next) {
+		if (!pw->pk &&
+#ifdef CONFIG_TESTING_OPTIONS
+		    !bss->sae_pk_password_check_skip &&
+#endif /* CONFIG_TESTING_OPTIONS */
+		    sae_pk_valid_password(pw->password))
+			return true;
+
+		if (bss->ssid.wpa_passphrase && res && pw->pk &&
+		    os_strcmp(bss->ssid.wpa_passphrase, pw->password) == 0)
+			res = false;
+	}
+
+	return res;
+}
+#endif /* CONFIG_SAE_PK */
+
+
+bool hostapd_config_check_bss_6g(struct hostapd_bss_config *bss)
+{
+	if (bss->wpa != WPA_PROTO_RSN) {
+		wpa_printf(MSG_ERROR,
+			   "Pre-RSNA security methods are not allowed in 6 GHz");
+		return false;
+	}
+
+	if (bss->ieee80211w != MGMT_FRAME_PROTECTION_REQUIRED) {
+		wpa_printf(MSG_ERROR,
+			   "Management frame protection is required in 6 GHz");
+		return false;
+	}
+
+	if (bss->wpa_key_mgmt & (WPA_KEY_MGMT_PSK |
+				 WPA_KEY_MGMT_FT_PSK |
+				 WPA_KEY_MGMT_PSK_SHA256)) {
+		wpa_printf(MSG_ERROR, "Invalid AKM suite for 6 GHz");
+		return false;
+	}
+
+	if (bss->rsn_pairwise & (WPA_CIPHER_WEP40 |
+				 WPA_CIPHER_WEP104 |
+				 WPA_CIPHER_TKIP)) {
+		wpa_printf(MSG_ERROR,
+			   "Invalid pairwise cipher suite for 6 GHz");
+		return false;
+	}
+
+	if (bss->wpa_group & (WPA_CIPHER_WEP40 |
+			      WPA_CIPHER_WEP104 |
+			      WPA_CIPHER_TKIP)) {
+		wpa_printf(MSG_ERROR, "Invalid group cipher suite for 6 GHz");
+		return false;
+	}
+
+#ifdef CONFIG_SAE
+	if (wpa_key_mgmt_sae(bss->wpa_key_mgmt) &&
+	    bss->sae_pwe == SAE_PWE_HUNT_AND_PECK) {
+		wpa_printf(MSG_INFO, "SAE: Enabling SAE H2E on 6 GHz");
+		bss->sae_pwe = SAE_PWE_BOTH;
+	}
+#endif /* CONFIG_SAE */
+
+	return true;
+}
+
+
 static int hostapd_config_check_bss(struct hostapd_bss_config *bss,
 				    struct hostapd_config *conf,
 				    int full_config)
 {
+	if (full_config && is_6ghz_op_class(conf->op_class) &&
+	    !hostapd_config_check_bss_6g(bss))
+		return -1;
+
 	if (full_config && bss->ieee802_1x && !bss->eap_server &&
 	    !bss->radius->auth_servers) {
 		wpa_printf(MSG_ERROR, "Invalid IEEE 802.1X configuration (no "
@@ -750,6 +1291,7 @@ static int hostapd_config_check_bss(struct hostapd_bss_config *bss,
 		return -1;
 	}
 
+#ifdef CONFIG_WEP
 	if (bss->wpa) {
 		int wep, i;
 
@@ -767,18 +1309,22 @@ static int hostapd_config_check_bss(struct hostapd_bss_config *bss,
 			return -1;
 		}
 	}
+#endif /* CONFIG_WEP */
 
 	if (full_config && bss->wpa &&
 	    bss->wpa_psk_radius != PSK_RADIUS_IGNORED &&
+	    bss->wpa_psk_radius != PSK_RADIUS_DURING_4WAY_HS &&
 	    bss->macaddr_acl != USE_EXTERNAL_RADIUS_AUTH) {
 		wpa_printf(MSG_ERROR, "WPA-PSK using RADIUS enabled, but no "
 			   "RADIUS checking (macaddr_acl=2) enabled.");
 		return -1;
 	}
 
-	if (full_config && bss->wpa && (bss->wpa_key_mgmt & WPA_KEY_MGMT_PSK) &&
+	if (full_config && bss->wpa &&
+	    wpa_key_mgmt_wpa_psk_no_sae(bss->wpa_key_mgmt) &&
 	    bss->ssid.wpa_psk == NULL && bss->ssid.wpa_passphrase == NULL &&
 	    bss->ssid.wpa_psk_file == NULL &&
+	    bss->wpa_psk_radius != PSK_RADIUS_DURING_4WAY_HS &&
 	    (bss->wpa_psk_radius != PSK_RADIUS_REQUIRED ||
 	     bss->macaddr_acl != USE_EXTERNAL_RADIUS_AUTH)) {
 		wpa_printf(MSG_ERROR, "WPA-PSK enabled, but PSK or passphrase "
@@ -802,7 +1348,23 @@ static int hostapd_config_check_bss(struct hostapd_bss_config *bss,
 		}
 	}
 
-#ifdef CONFIG_IEEE80211R
+	if (full_config) {
+		size_t i;
+
+		for (i = 0; i < conf->num_bss; i++) {
+			if (conf->bss[i] != bss &&
+			    os_strcmp(conf->bss[i]->iface, bss->iface) == 0) {
+				wpa_printf(MSG_ERROR,
+					   "Duplicate interface '%s' for BSSID "
+					   MACSTR " and " MACSTR, bss->iface,
+					   MAC2STR(conf->bss[i]->bssid),
+					   MAC2STR(bss->bssid));
+				return -1;
+			}
+		}
+	}
+
+#ifdef CONFIG_IEEE80211R_AP
 	if (full_config && wpa_key_mgmt_ft(bss->wpa_key_mgmt) &&
 	    (bss->nas_identifier == NULL ||
 	     os_strlen(bss->nas_identifier) < 1 ||
@@ -812,43 +1374,76 @@ static int hostapd_config_check_bss(struct hostapd_bss_config *bss,
 			   "string");
 		return -1;
 	}
-#endif /* CONFIG_IEEE80211R */
+#endif /* CONFIG_IEEE80211R_AP */
 
-#ifdef CONFIG_IEEE80211N
 	if (full_config && conf->ieee80211n &&
 	    conf->hw_mode == HOSTAPD_MODE_IEEE80211B) {
-		bss->disable_11n = 1;
+		bss->disable_11n = true;
 		wpa_printf(MSG_ERROR, "HT (IEEE 802.11n) in 11b mode is not "
 			   "allowed, disabling HT capabilities");
 	}
 
+#ifdef CONFIG_WEP
 	if (full_config && conf->ieee80211n &&
 	    bss->ssid.security_policy == SECURITY_STATIC_WEP) {
-		bss->disable_11n = 1;
+		bss->disable_11n = true;
 		wpa_printf(MSG_ERROR, "HT (IEEE 802.11n) with WEP is not "
 			   "allowed, disabling HT capabilities");
 	}
+#endif /* CONFIG_WEP */
 
 	if (full_config && conf->ieee80211n && bss->wpa &&
 	    !(bss->wpa_pairwise & WPA_CIPHER_CCMP) &&
 	    !(bss->rsn_pairwise & (WPA_CIPHER_CCMP | WPA_CIPHER_GCMP |
 				   WPA_CIPHER_CCMP_256 | WPA_CIPHER_GCMP_256)))
 	{
-		bss->disable_11n = 1;
+		bss->disable_11n = true;
 		wpa_printf(MSG_ERROR, "HT (IEEE 802.11n) with WPA/WPA2 "
 			   "requires CCMP/GCMP to be enabled, disabling HT "
 			   "capabilities");
 	}
-#endif /* CONFIG_IEEE80211N */
 
 #ifdef CONFIG_IEEE80211AC
+#ifdef CONFIG_WEP
 	if (full_config && conf->ieee80211ac &&
 	    bss->ssid.security_policy == SECURITY_STATIC_WEP) {
-		bss->disable_11ac = 1;
+		bss->disable_11ac = true;
 		wpa_printf(MSG_ERROR,
 			   "VHT (IEEE 802.11ac) with WEP is not allowed, disabling VHT capabilities");
 	}
+#endif /* CONFIG_WEP */
+
+	if (full_config && conf->ieee80211ac && bss->wpa &&
+	    !(bss->wpa_pairwise & WPA_CIPHER_CCMP) &&
+	    !(bss->rsn_pairwise & (WPA_CIPHER_CCMP | WPA_CIPHER_GCMP |
+				   WPA_CIPHER_CCMP_256 | WPA_CIPHER_GCMP_256)))
+	{
+		bss->disable_11ac = true;
+		wpa_printf(MSG_ERROR,
+			   "VHT (IEEE 802.11ac) with WPA/WPA2 requires CCMP/GCMP to be enabled, disabling VHT capabilities");
+	}
 #endif /* CONFIG_IEEE80211AC */
+
+#ifdef CONFIG_IEEE80211AX
+#ifdef CONFIG_WEP
+	if (full_config && conf->ieee80211ax &&
+	    bss->ssid.security_policy == SECURITY_STATIC_WEP) {
+		bss->disable_11ax = true;
+		wpa_printf(MSG_ERROR,
+			   "HE (IEEE 802.11ax) with WEP is not allowed, disabling HE capabilities");
+	}
+#endif /* CONFIG_WEP */
+
+	if (full_config && conf->ieee80211ax && bss->wpa &&
+	    !(bss->wpa_pairwise & WPA_CIPHER_CCMP) &&
+	    !(bss->rsn_pairwise & (WPA_CIPHER_CCMP | WPA_CIPHER_GCMP |
+				   WPA_CIPHER_CCMP_256 | WPA_CIPHER_GCMP_256)))
+	{
+		bss->disable_11ax = true;
+		wpa_printf(MSG_ERROR,
+			   "HE (IEEE 802.11ax) with WPA/WPA2 requires CCMP/GCMP to be enabled, disabling HE capabilities");
+	}
+#endif /* CONFIG_IEEE80211AX */
 
 #ifdef CONFIG_WPS
 	if (full_config && bss->wps_state && bss->ignore_broadcast_ssid) {
@@ -857,16 +1452,20 @@ static int hostapd_config_check_bss(struct hostapd_bss_config *bss,
 		bss->wps_state = 0;
 	}
 
+#ifdef CONFIG_WEP
 	if (full_config && bss->wps_state &&
 	    bss->ssid.wep.keys_set && bss->wpa == 0) {
 		wpa_printf(MSG_INFO, "WPS: WEP configuration forced WPS to be "
 			   "disabled");
 		bss->wps_state = 0;
 	}
+#endif /* CONFIG_WEP */
 
 	if (full_config && bss->wps_state && bss->wpa &&
 	    (!(bss->wpa & 2) ||
-	     !(bss->rsn_pairwise & (WPA_CIPHER_CCMP | WPA_CIPHER_GCMP)))) {
+	     !(bss->rsn_pairwise & (WPA_CIPHER_CCMP | WPA_CIPHER_GCMP |
+				    WPA_CIPHER_CCMP_256 |
+				    WPA_CIPHER_GCMP_256)))) {
 		wpa_printf(MSG_INFO, "WPS: WPA/TKIP configuration without "
 			   "WPA2/CCMP/GCMP forced WPS to be disabled");
 		bss->wps_state = 0;
@@ -894,6 +1493,83 @@ static int hostapd_config_check_bss(struct hostapd_bss_config *bss,
 		return -1;
 	}
 #endif /* CONFIG_MBO */
+
+#ifdef CONFIG_OCV
+	if (full_config && bss->ieee80211w == NO_MGMT_FRAME_PROTECTION &&
+	    bss->ocv) {
+		wpa_printf(MSG_ERROR,
+			   "OCV: PMF needs to be enabled whenever using OCV");
+		return -1;
+	}
+#endif /* CONFIG_OCV */
+
+#ifdef CONFIG_SAE_PK
+	if (full_config && hostapd_sae_pk_in_use(bss) &&
+	    hostapd_sae_pk_password_without_pk(bss)) {
+		wpa_printf(MSG_ERROR,
+			   "SAE-PK: SAE password uses SAE-PK style, but does not have PK configured");
+		return -1;
+	}
+#endif /* CONFIG_SAE_PK */
+
+#ifdef CONFIG_FILS
+	if (full_config && bss->fils_discovery_max_int &&
+	    (!conf->ieee80211ax || bss->disable_11ax)) {
+		wpa_printf(MSG_ERROR,
+			   "Currently IEEE 802.11ax support is mandatory to enable FILS discovery transmission.");
+		return -1;
+	}
+
+	if (full_config && bss->fils_discovery_max_int &&
+	    bss->unsol_bcast_probe_resp_interval) {
+		wpa_printf(MSG_ERROR,
+			   "Cannot enable both FILS discovery and unsolicited broadcast Probe Response at the same time");
+		return -1;
+	}
+#endif /* CONFIG_FILS */
+
+#ifdef CONFIG_IEEE80211BE
+	if (full_config && !bss->disable_11be && bss->disable_11ax) {
+		bss->disable_11be = true;
+		bss->mld_ap = 0;
+		wpa_printf(MSG_INFO,
+			   "Disabling IEEE 802.11be as IEEE 802.11ax is disabled for this BSS");
+	}
+
+	if (full_config && conf->ieee80211be && !bss->disable_11be &&
+	    !bss->beacon_prot && ap_pmf_enabled(bss)) {
+		bss->beacon_prot = 1;
+		wpa_printf(MSG_INFO,
+			   "Enabling beacon protection as IEEE 802.11be is enabled for this BSS");
+	}
+
+	if (full_config && (!conf->ieee80211be || bss->disable_11be) &&
+	    bss->mld_ap) {
+		wpa_printf(MSG_INFO,
+			   "Cannot enable mld_ap when IEEE 802.11be is disabled");
+		return -1;
+	}
+
+	if (full_config && (!conf->ieee80211be || bss->disable_11be) &&
+	    bss->bss_require_eht) {
+		bss->bss_require_eht = false;
+		wpa_printf(MSG_INFO,
+			   "Disabling bss_require_eht as IEEE 802.11be is disabled for this BSS");
+	}
+#endif /* CONFIG_IEEE80211BE */
+
+	if (full_config && bss->ignore_broadcast_ssid && conf->mbssid) {
+		wpa_printf(MSG_ERROR,
+			   "Hidden SSID is not suppored when MBSSID is enabled");
+		return -1;
+	}
+
+	/* Do not advertise SPP A-MSDU support if not using CCMP/GCMP */
+	if (full_config && bss->spp_amsdu &&
+	    !(bss->wpa &&
+	      bss->rsn_pairwise & (WPA_CIPHER_CCMP_256 | WPA_CIPHER_CCMP |
+				   WPA_CIPHER_GCMP_256 | WPA_CIPHER_GCMP)))
+		bss->spp_amsdu = false;
 
 	return 0;
 }
@@ -926,6 +1602,13 @@ int hostapd_config_check(struct hostapd_config *conf, int full_config)
 {
 	size_t i;
 
+	if (full_config && is_6ghz_op_class(conf->op_class) &&
+	    !conf->hw_mode_set) {
+		/* Use the appropriate hw_mode value automatically when the
+		 * op_class parameter has been set, but hw_mode was not. */
+		conf->hw_mode = HOSTAPD_MODE_IEEE80211A;
+	}
+
 	if (full_config && conf->ieee80211d &&
 	    (!conf->country[0] || !conf->country[1])) {
 		wpa_printf(MSG_ERROR, "Cannot enable IEEE 802.11d without "
@@ -951,9 +1634,34 @@ int hostapd_config_check(struct hostapd_config *conf, int full_config)
 		return -1;
 	}
 
+#ifdef CONFIG_AIRTIME_POLICY
+	if (full_config && conf->airtime_mode > AIRTIME_MODE_STATIC &&
+	    !conf->airtime_update_interval) {
+		wpa_printf(MSG_ERROR, "Airtime update interval cannot be zero");
+		return -1;
+	}
+#endif /* CONFIG_AIRTIME_POLICY */
 	for (i = 0; i < NUM_TX_QUEUES; i++) {
 		if (hostapd_config_check_cw(conf, i))
 			return -1;
+	}
+
+#ifdef CONFIG_IEEE80211BE
+	if (full_config && conf->ieee80211be && !conf->ieee80211ax) {
+		wpa_printf(MSG_ERROR,
+			   "Cannot set ieee80211be without ieee80211ax");
+		return -1;
+	}
+
+	if (full_config)
+		hostapd_set_and_check_bw320_offset(conf,
+						   conf->eht_bw320_offset);
+#endif /* CONFIG_IEEE80211BE */
+
+	if (full_config && conf->mbssid && !conf->ieee80211ax) {
+		wpa_printf(MSG_ERROR,
+			   "Cannot enable multiple BSSID support without ieee80211ax");
+		return -1;
 	}
 
 	for (i = 0; i < conf->num_bss; i++) {
@@ -968,16 +1676,25 @@ int hostapd_config_check(struct hostapd_config *conf, int full_config)
 void hostapd_set_security_params(struct hostapd_bss_config *bss,
 				 int full_config)
 {
+#ifdef CONFIG_WEP
 	if (bss->individual_wep_key_len == 0) {
 		/* individual keys are not use; can use key idx0 for
 		 * broadcast keys */
 		bss->broadcast_key_idx_min = 0;
 	}
+#endif /* CONFIG_WEP */
 
 	if ((bss->wpa & 2) && bss->rsn_pairwise == 0)
 		bss->rsn_pairwise = bss->wpa_pairwise;
-	bss->wpa_group = wpa_select_ap_group_cipher(bss->wpa, bss->wpa_pairwise,
-						    bss->rsn_pairwise);
+	if (bss->group_cipher)
+		bss->wpa_group = bss->group_cipher;
+	else
+		bss->wpa_group = wpa_select_ap_group_cipher(bss->wpa,
+							    bss->wpa_pairwise,
+							    bss->rsn_pairwise);
+	if (!bss->wpa_group_rekey_set)
+		bss->wpa_group_rekey = bss->wpa_group == WPA_CIPHER_TKIP ?
+			600 : 86400;
 
 	if (full_config) {
 		bss->radius->auth_server = bss->radius->auth_servers;
@@ -991,6 +1708,7 @@ void hostapd_set_security_params(struct hostapd_bss_config *bss,
 	} else if (bss->ieee802_1x) {
 		int cipher = WPA_CIPHER_NONE;
 		bss->ssid.security_policy = SECURITY_IEEE_802_1X;
+#ifdef CONFIG_WEP
 		bss->ssid.wep.default_len = bss->default_wep_key_len;
 		if (full_config && bss->default_wep_key_len) {
 			cipher = bss->default_wep_key_len >= 13 ?
@@ -1001,11 +1719,13 @@ void hostapd_set_security_params(struct hostapd_bss_config *bss,
 			else
 				cipher = WPA_CIPHER_WEP40;
 		}
+#endif /* CONFIG_WEP */
 		bss->wpa_group = cipher;
 		bss->wpa_pairwise = cipher;
 		bss->rsn_pairwise = cipher;
 		if (full_config)
 			bss->wpa_key_mgmt = WPA_KEY_MGMT_IEEE8021X_NO_WPA;
+#ifdef CONFIG_WEP
 	} else if (bss->ssid.wep.keys_set) {
 		int cipher = WPA_CIPHER_WEP40;
 		if (bss->ssid.wep.len[0] >= 13)
@@ -1016,11 +1736,7 @@ void hostapd_set_security_params(struct hostapd_bss_config *bss,
 		bss->rsn_pairwise = cipher;
 		if (full_config)
 			bss->wpa_key_mgmt = WPA_KEY_MGMT_NONE;
-	} else if (bss->osen) {
-		bss->ssid.security_policy = SECURITY_OSEN;
-		bss->wpa_group = WPA_CIPHER_CCMP;
-		bss->wpa_pairwise = 0;
-		bss->rsn_pairwise = WPA_CIPHER_CCMP;
+#endif /* CONFIG_WEP */
 	} else {
 		bss->ssid.security_policy = SECURITY_PLAINTEXT;
 		if (full_config) {
@@ -1028,6 +1744,110 @@ void hostapd_set_security_params(struct hostapd_bss_config *bss,
 			bss->wpa_pairwise = WPA_CIPHER_NONE;
 			bss->rsn_pairwise = WPA_CIPHER_NONE;
 			bss->wpa_key_mgmt = WPA_KEY_MGMT_NONE;
+		}
+	}
+}
+
+
+int hostapd_sae_pw_id_in_use(struct hostapd_bss_config *conf)
+{
+	int with_id = 0, without_id = 0;
+	struct sae_password_entry *pw;
+
+	if (conf->ssid.wpa_passphrase)
+		without_id = 1;
+
+	for (pw = conf->sae_passwords; pw; pw = pw->next) {
+		if (pw->identifier)
+			with_id = 1;
+		else
+			without_id = 1;
+		if (with_id && without_id)
+			break;
+	}
+
+	if (with_id && !without_id)
+		return 2;
+	return with_id;
+}
+
+
+bool hostapd_sae_pk_in_use(struct hostapd_bss_config *conf)
+{
+#ifdef CONFIG_SAE_PK
+	struct sae_password_entry *pw;
+
+	for (pw = conf->sae_passwords; pw; pw = pw->next) {
+		if (pw->pk)
+			return true;
+	}
+#endif /* CONFIG_SAE_PK */
+
+	return false;
+}
+
+
+#ifdef CONFIG_SAE_PK
+bool hostapd_sae_pk_exclusively(struct hostapd_bss_config *conf)
+{
+	bool with_pk = false;
+	struct sae_password_entry *pw;
+
+	if (conf->ssid.wpa_passphrase)
+		return false;
+
+	for (pw = conf->sae_passwords; pw; pw = pw->next) {
+		if (!pw->pk)
+			return false;
+		with_pk = true;
+	}
+
+	return with_pk;
+}
+#endif /* CONFIG_SAE_PK */
+
+
+int hostapd_acl_comp(const void *a, const void *b)
+{
+	const struct mac_acl_entry *aa = a;
+	const struct mac_acl_entry *bb = b;
+	return os_memcmp(aa->addr, bb->addr, sizeof(macaddr));
+}
+
+
+int hostapd_add_acl_maclist(struct mac_acl_entry **acl, int *num,
+			    int vlan_id, const u8 *addr)
+{
+	struct mac_acl_entry *newacl;
+
+	newacl = os_realloc_array(*acl, *num + 1, sizeof(**acl));
+	if (!newacl) {
+		wpa_printf(MSG_ERROR, "MAC list reallocation failed");
+		return -1;
+	}
+
+	*acl = newacl;
+	os_memcpy((*acl)[*num].addr, addr, ETH_ALEN);
+	os_memset(&(*acl)[*num].vlan_id, 0, sizeof((*acl)[*num].vlan_id));
+	(*acl)[*num].vlan_id.untagged = vlan_id;
+	(*acl)[*num].vlan_id.notempty = !!vlan_id;
+	(*num)++;
+
+	return 0;
+}
+
+
+void hostapd_remove_acl_mac(struct mac_acl_entry **acl, int *num,
+			    const u8 *addr)
+{
+	int i = 0;
+
+	while (i < *num) {
+		if (ether_addr_equal((*acl)[i].addr, addr)) {
+			os_remove_in_array(*acl, *num, sizeof(**acl), i);
+			(*num)--;
+		} else {
+			i++;
 		}
 	}
 }

@@ -1,6 +1,6 @@
 /*
  * Common driver-related functions
- * Copyright (c) 2003-2011, Jouni Malinen <j@w1.fi>
+ * Copyright (c) 2003-2017, Jouni Malinen <j@w1.fi>
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -35,7 +35,6 @@ const char * event_to_string(enum wpa_event_type event)
 	E2S(ASSOCINFO);
 	E2S(INTERFACE_STATUS);
 	E2S(PMKID_CANDIDATE);
-	E2S(STKSTART);
 	E2S(TDLS);
 	E2S(FT_RESPONSE);
 	E2S(IBSS_RSN_START);
@@ -68,6 +67,7 @@ const char * event_to_string(enum wpa_event_type event)
 	E2S(DRIVER_CLIENT_POLL_OK);
 	E2S(EAPOL_TX_STATUS);
 	E2S(CH_SWITCH);
+	E2S(CH_SWITCH_STARTED);
 	E2S(WNM);
 	E2S(CONNECT_FAILED_REASON);
 	E2S(DFS_RADAR_DETECTED);
@@ -81,6 +81,35 @@ const char * event_to_string(enum wpa_event_type event)
 	E2S(ACS_CHANNEL_SELECTED);
 	E2S(DFS_CAC_STARTED);
 	E2S(P2P_LO_STOP);
+	E2S(BEACON_LOSS);
+	E2S(DFS_PRE_CAC_EXPIRED);
+	E2S(EXTERNAL_AUTH);
+	E2S(PORT_AUTHORIZED);
+	E2S(STATION_OPMODE_CHANGED);
+	E2S(INTERFACE_MAC_CHANGED);
+	E2S(WDS_STA_INTERFACE_STATUS);
+	E2S(UPDATE_DH);
+	E2S(UNPROT_BEACON);
+	E2S(TX_WAIT_EXPIRE);
+	E2S(BSS_COLOR_COLLISION);
+	E2S(CCA_STARTED_NOTIFY);
+	E2S(CCA_ABORTED_NOTIFY);
+	E2S(CCA_NOTIFY);
+	E2S(PASN_AUTH);
+	E2S(LINK_CH_SWITCH);
+	E2S(LINK_CH_SWITCH_STARTED);
+	E2S(TID_LINK_MAP);
+	E2S(LINK_RECONFIG);
+	E2S(MLD_INTERFACE_FREED);
+	E2S(SETUP_LINK_RECONFIG);
+	E2S(NAN_CLUSTER_JOIN);
+	E2S(NAN_NEXT_DW);
+	E2S(INCUMBT_SIG_INTF_DETECTED);
+	E2S(NAN_SCHED_UPDATE_DONE);
+	E2S(NAN_ULW_UPDATE);
+	E2S(NAN_CHAN_EVACUATION);
+	E2S(PEER_MEASUREMENT_RESULT);
+	E2S(PEER_MEASUREMENT_COMPLETE);
 	}
 
 	return "UNKNOWN";
@@ -103,8 +132,31 @@ const char * channel_width_to_string(enum chan_width width)
 		return "80+80 MHz";
 	case CHAN_WIDTH_160:
 		return "160 MHz";
+	case CHAN_WIDTH_320:
+		return "320 MHz";
 	default:
 		return "unknown";
+	}
+}
+
+
+int channel_width_to_int(enum chan_width width)
+{
+	switch (width) {
+	case CHAN_WIDTH_20_NOHT:
+	case CHAN_WIDTH_20:
+		return 20;
+	case CHAN_WIDTH_40:
+		return 40;
+	case CHAN_WIDTH_80:
+		return 80;
+	case CHAN_WIDTH_80P80:
+	case CHAN_WIDTH_160:
+		return 160;
+	case CHAN_WIDTH_320:
+		return 320;
+	default:
+		return 0;
 	}
 }
 
@@ -142,6 +194,36 @@ int vht_supported(const struct hostapd_hw_modes *mode)
 	 * TODO: Verify if this complies with the standard
 	 */
 	return (mode->vht_mcs_set[0] & 0x3) != 3;
+}
+
+
+bool he_supported(const struct hostapd_hw_modes *hw_mode,
+		  enum ieee80211_op_mode op_mode)
+{
+	if (!(hw_mode->flags & HOSTAPD_MODE_FLAG_HE_INFO_KNOWN)) {
+		/*
+		 * The driver did not indicate whether it supports HE. Assume
+		 * it does to avoid connection issues.
+		 */
+		return true;
+	}
+
+	return hw_mode->he_capab[op_mode].he_supported;
+}
+
+
+bool eht_supported(const struct hostapd_hw_modes *hw_mode,
+		   enum ieee80211_op_mode op_mode)
+{
+	if (!(hw_mode->flags & HOSTAPD_MODE_FLAG_EHT_INFO_KNOWN)) {
+		/*
+		 * The driver did not indicate whether it supports EHT. Assume
+		 * it does to avoid connection issues.
+		 */
+		return true;
+	}
+
+	return hw_mode->eht_capab[op_mode].eht_supported;
 }
 
 
@@ -228,7 +310,8 @@ const char * driver_flag_to_string(u64 flag)
 	DF2S(DRIVER_IE);
 	DF2S(SET_KEYS_AFTER_ASSOC);
 	DF2S(DFS_OFFLOAD);
-	DF2S(4WAY_HANDSHAKE);
+	DF2S(4WAY_HANDSHAKE_PSK);
+	DF2S(4WAY_HANDSHAKE_8021X);
 	DF2S(WIRED);
 	DF2S(SME);
 	DF2S(AP);
@@ -239,7 +322,7 @@ const char * driver_flag_to_string(u64 flag)
 	DF2S(P2P_CAPABLE);
 	DF2S(AP_TEARDOWN_SUPPORT);
 	DF2S(P2P_MGMT_AND_NON_P2P);
-	DF2S(SANE_ERROR_CODES);
+	DF2S(VALID_ERROR_CODES);
 	DF2S(OFFCHANNEL_TX);
 	DF2S(EAPOL_TX_STATUS);
 	DF2S(DEAUTH_TX_STATUS);
@@ -267,6 +350,55 @@ const char * driver_flag_to_string(u64 flag)
 	DF2S(OFFCHANNEL_SIMULTANEOUS);
 	DF2S(FULL_AP_CLIENT_STATE);
 	DF2S(P2P_LISTEN_OFFLOAD);
+	DF2S(SUPPORT_FILS);
+	DF2S(BEACON_RATE_LEGACY);
+	DF2S(BEACON_RATE_HT);
+	DF2S(BEACON_RATE_VHT);
+	DF2S(MGMT_TX_RANDOM_TA);
+	DF2S(MGMT_TX_RANDOM_TA_CONNECTED);
+	DF2S(SCHED_SCAN_RELATIVE_RSSI);
+	DF2S(HE_CAPABILITIES);
+	DF2S(FILS_SK_OFFLOAD);
+	DF2S(OCE_STA);
+	DF2S(OCE_AP);
+	DF2S(OCE_STA_CFON);
+	DF2S(MFP_OPTIONAL);
+	DF2S(SELF_MANAGED_REGULATORY);
+	DF2S(FTM_RESPONDER);
+	DF2S(CONTROL_PORT);
+	DF2S(VLAN_OFFLOAD);
+	DF2S(UPDATE_FT_IES);
+	DF2S(SAFE_PTK0_REKEYS);
+	DF2S(BEACON_PROTECTION);
+	DF2S(EXTENDED_KEY_ID);
+	}
+	return "UNKNOWN";
+#undef DF2S
+}
+
+
+const char * driver_flag2_to_string(u64 flag2)
+{
+#define DF2S(x) case WPA_DRIVER_FLAGS2_ ## x: return #x
+	switch (flag2) {
+	DF2S(CONTROL_PORT_RX);
+	DF2S(CONTROL_PORT_TX_STATUS);
+	DF2S(SEC_LTF_AP);
+	DF2S(SEC_RTT_AP);
+	DF2S(PROT_RANGE_NEG_AP);
+	DF2S(BEACON_RATE_HE);
+	DF2S(BEACON_PROTECTION_CLIENT);
+	DF2S(OCV);
+	DF2S(AP_SME);
+	DF2S(SA_QUERY_OFFLOAD_AP);
+	DF2S(RADAR_BACKGROUND);
+	DF2S(SEC_LTF_STA);
+	DF2S(SEC_RTT_STA);
+	DF2S(PROT_RANGE_NEG_STA);
+	DF2S(MLO);
+	DF2S(SCAN_MIN_PREQ);
+	DF2S(SAE_OFFLOAD_STA);
+	DF2S(SPP_AMSDU);
 	}
 	return "UNKNOWN";
 #undef DF2S

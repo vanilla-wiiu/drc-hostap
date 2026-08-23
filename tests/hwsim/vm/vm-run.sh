@@ -13,7 +13,7 @@ else
 fi
 
 # increase the memory size if you want to run with valgrind, 512 MB works
-MEMORY=192
+MEMORY=256
 
 # Some ubuntu systems (notably 12.04) have issues with this - since the guest
 # mounts as read-only it should be safe to not specify ,readonly. Override in
@@ -40,7 +40,18 @@ if [ -z "$KERNEL" ] && [ -z "$KERNELDIR" ] ; then
 	exit 2
 fi
 if [ -z "$KERNEL" ] ; then
-	KERNEL=$KERNELDIR/arch/x86_64/boot/bzImage
+	if [ -e $KERNELDIR/arch/x86_64/boot/bzImage ]; then
+		KERNEL=$KERNELDIR/arch/x86_64/boot/bzImage
+	elif [ -e $KERNELDIR/linux ]; then
+		KERNEL=$KERNELDIR/linux
+	else
+		echo "No suitable kernel image found from KERNELDIR"
+		exit 2
+	fi
+fi
+if [ ! -e $KERNEL ]; then
+	echo "Kernel image not found: $KERNEL"
+	exit 2
 fi
 
 
@@ -51,7 +62,9 @@ TIMESTAMP=$(date +%s)
 DATE=$TIMESTAMP
 CODECOV=no
 TIMEWARP=0
-DELAY=0
+GDB=0
+TELNET_QEMU=
+TELNET_ARG=0
 CODECOV_DIR=
 while [ "$1" != "" ]; do
 	case $1 in
@@ -73,8 +86,12 @@ while [ "$1" != "" ]; do
 		--timewrap ) shift
 			TIMEWARP=1
 			;;
-	        --delay ) shift
-			DELAY=$1
+		--gdb ) shift
+			GDB=1
+			;;
+		--telnet ) shift
+			TELNET_ARG=1
+			TELNET_QEMU="-net nic,model=virtio -net user,id=telnet,restrict=on,net=172.16.0.0/24,hostfwd=tcp:127.0.0.1:$1-:23"
 			shift
 			;;
 		* )
@@ -86,6 +103,8 @@ done
 
 LOGDIR=$LOGS/$DATE
 mkdir -p $LOGDIR
+rm -f $LOGS/latest
+ln -s $LOGDIR $LOGS/latest
 
 if [ -n "$CODECOV_DIR" ]; then
     cp -a $CODECOV_DIR/alt-wpa_supplicant $LOGDIR
@@ -98,20 +117,19 @@ else
     CODECOV=no
 fi
 
-if [ $DELAY -gt 0 ]; then
-    echo "Wait $DELAY seconds before starting VM"
-    sleep $DELAY
-fi
-
 echo "Starting test run in a virtual machine"
 
-KVM=kvm
-for kvmprog in kvm qemu-kvm; do
-    if $kvmprog --version &> /dev/null; then
-	KVM=$kvmprog
-	break
-    fi
-done
+if [ -x $KERNEL ]; then
+	unset KVM
+else
+	KVM=kvm
+	for kvmprog in kvm qemu-kvm; do
+		if $kvmprog --version &> /dev/null; then
+			KVM=$kvmprog
+			break
+		fi
+	done
+fi
 
 argsfile=$(mktemp)
 if [ $? -ne 0 ] ; then
@@ -122,17 +140,67 @@ function finish {
 }
 trap finish EXIT
 
+if [ -z $KVM ]; then
+	RUN_TEST_ARGS="--long $RUN_TEST_ARGS"
+fi
 echo "$RUN_TEST_ARGS" > $argsfile
 
-$KVM \
-	-kernel $KERNEL -smp 4 \
-	$KVMARGS -m $MEMORY -nographic \
-	-fsdev local,security_model=none,id=fsdev-root,path=/$ROTAG \
-	-device virtio-9p-pci,id=fs-root,fsdev=fsdev-root,mount_tag=/dev/root \
-	-fsdev local,security_model=none,id=fsdev-logs,path="$LOGDIR",writeout=immediate \
-	-device virtio-9p-pci,id=fs-logs,fsdev=fsdev-logs,mount_tag=logshare \
-	-monitor null -serial stdio -serial file:$LOGDIR/console \
-	-append "mac80211_hwsim.support_p2p_device=0 mac80211_hwsim.channels=$CHANNELS mac80211_hwsim.radios=7 init=$CMD testdir=$TESTDIR timewarp=$TIMEWARP console=$KVMOUT root=/dev/root rootflags=trans=virtio,version=9p2000.u ro rootfstype=9p EPATH=$EPATH ARGS=$argsfile"
+A="mac80211_hwsim.support_p2p_device=0 "
+A+="mac80211_hwsim.channels=$CHANNELS "
+A+="mac80211_hwsim.radios=7 "
+A+="cfg80211.dyndbg=+p "
+A+="mac80211.dyndbg=+p "
+A+="mac80211_hwsim.dyndbg=+p "
+A+="init=$CMD "
+A+="TESTDIR=$TESTDIR "
+A+="TIMEWARP=$TIMEWARP "
+A+="MODULEDIR=$MODULEDIR "
+A+="TELNET=$TELNET_ARG "
+A+="EPATH=$EPATH "
+A+="ARGS=$argsfile "
+A+="console=$KVMOUT "
+COMMITID="$(git rev-parse HEAD)"
+if [ -n "$COMMITID" ]; then
+    A+="COMMITID=$COMMITID "
+fi
+A+="ro"
+
+if [ -z $KVM ]; then
+	UML_ARGS="mem=${MEMORY}M \
+	     LOGDIR=$LOGDIR \
+	     umid=hwsim-$DATE \
+	     time-travel=inf-cpu \
+	     $A \
+	     root=none hostfs=/ rootfstype=hostfs rootflags=/ \
+	     ssl0=fd:0,fd:1 \
+	     ssl1=fd:100 \
+	     ssl-non-raw"
+
+	if [ "$GDB" = "1" ] ; then
+		export KERNELDIR=$KERNELDIR
+		export MODULEDIR=$MODULEDIR
+		gdb -ex "source linux.gdb" --args $KERNEL $UML_ARGS 100<>$LOGDIR/console
+	else
+		$KERNEL $UML_ARGS 100<>$LOGDIR/console 2>&1 | sed -u '0,/VM has started up/d'
+	fi
+else
+	$KVM \
+	    -kernel $KERNEL \
+	    -smp 4 \
+	    $KVMARGS \
+	    -m $MEMORY \
+	    -nographic \
+	    -fsdev local,security_model=none,id=fsdev-root,path=/$ROTAG \
+	    -device virtio-9p-pci,id=fs-root,fsdev=fsdev-root,mount_tag=/dev/root \
+	    -fsdev local,security_model=none,id=fsdev-logs,path="$LOGDIR",writeout=immediate \
+	    -device virtio-9p-pci,id=fs-logs,fsdev=fsdev-logs,mount_tag=logshare \
+	    -monitor null \
+	    -serial stdio \
+	    -serial file:$LOGDIR/console \
+	    $TELNET_QEMU \
+	    -append "$A root=/dev/root rootflags=trans=virtio,version=9p2000.u rootfstype=9p" | \
+	    sed -u '0,/VM has started up/d'
+fi
 
 if [ $CODECOV = "yes" ]; then
     echo "Preparing code coverage reports"
@@ -142,7 +210,7 @@ fi
 
 echo
 echo "Test run completed"
-echo "Logfiles are at $LOGDIR"
+echo "Logfiles are at $LOGDIR ($LOGS/latest)"
 if [ $CODECOV = "yes" ]; then
     echo "Code coverage report:"
     echo "file://$LOGDIR/lcov/index.html"

@@ -26,9 +26,8 @@ to verify that operations have been performed correctly and that the
 network connection works in the expected way.
 
 These test cases are run automatically against the hostap.git commits
-for regression testing and to help in keeping the hostap.git master
-branch in stable state. Results from these tests are available here:
-http://buildbot.w1.fi/hwsim/
+for regression testing and to help in keeping the hostap.git main
+branch in stable state.
 
 
 Building binaries for testing
@@ -45,7 +44,7 @@ make
 cd ../hostapd
 cp ../tests/hwsim/example-hostapd.config .config
 make clean
-make hostapd hlr_auc_gw
+make hostapd hostapd_cli hlr_auc_gw
 cd ../wlantest
 make clean
 make

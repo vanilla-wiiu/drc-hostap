@@ -1,5 +1,5 @@
 # P2P helper functions
-# Copyright (c) 2013-2015, Jouni Malinen <j@w1.fi>
+# Copyright (c) 2013-2019, Jouni Malinen <j@w1.fi>
 #
 # This software may be distributed under the terms of the BSD license.
 # See README for more details.
@@ -8,7 +8,10 @@ import logging
 logger = logging.getLogger()
 import threading
 import time
-import Queue
+try:
+    from Queue import Queue
+except ImportError:
+    from queue import Queue
 
 import hwsim_utils
 
@@ -91,6 +94,12 @@ def go_neg_pin_authorized_persistent(i_dev, r_dev, i_intent=None, r_intent=None,
                                   timeout=20, go_intent=i_intent,
                                   persistent=True)
     r_res = r_dev.p2p_go_neg_auth_result()
+    if i_res and r_res and \
+       i_res['result'] == 'success' and r_res['result'] == 'success':
+        if i_res['role'] == 'GO':
+            i_dev.wait_sta(addr=r_dev.p2p_interface_addr())
+        if r_res['role'] == 'GO':
+            r_dev.wait_sta(addr=i_dev.p2p_interface_addr())
     logger.debug("i_res: " + str(i_res))
     logger.debug("r_res: " + str(r_res))
     r_dev.dump_monitor()
@@ -102,6 +111,7 @@ def go_neg_pin_authorized_persistent(i_dev, r_dev, i_intent=None, r_intent=None,
 
 def terminate_group(go, cli):
     logger.info("Terminate persistent group")
+    cli.close_monitor_group()
     go.remove_group()
     cli.wait_go_ending_session()
 
@@ -179,9 +189,9 @@ def invite_from_cli(go, cli, terminate=True):
         terminate_group(go, cli)
     return [go_res, cli_res]
 
-def invite_from_go(go, cli, terminate=True):
+def invite_from_go(go, cli, terminate=True, extra=None):
     logger.info("Re-invoke persistent group from GO")
-    invite(go, cli)
+    invite(go, cli, extra=extra)
     [go_res, cli_res] = check_result(go, cli)
     hwsim_utils.test_connectivity_p2p(go, cli)
     if terminate:
@@ -201,6 +211,7 @@ def connect_cli(go, client, social=False, freq=None):
     res = client.p2p_connect_group(go.p2p_dev_addr(), pin, timeout=60,
                                    social=social, freq=freq)
     logger.info("Client connected")
+    go.wait_sta(client.p2p_interface_addr())
     hwsim_utils.test_connectivity_p2p(go, client)
     return res
 
@@ -227,7 +238,7 @@ def go_neg_init(i_dev, r_dev, pin, i_method, i_intent, res):
     try:
         i_res = i_dev.p2p_go_neg_init(r_dev.p2p_dev_addr(), pin, i_method, timeout=20, go_intent=i_intent)
         logger.debug("i_res: " + str(i_res))
-    except Exception, e:
+    except Exception as e:
         i_res = None
         logger.info("go_neg_init thread caught an exception from p2p_go_neg_init: " + str(e))
     res.put(i_res)
@@ -238,16 +249,23 @@ def go_neg_pin(i_dev, r_dev, i_intent=None, r_intent=None, i_method='enter', r_m
     pin = r_dev.wps_read_pin()
     logger.info("Start GO negotiation " + i_dev.ifname + " -> " + r_dev.ifname)
     r_dev.dump_monitor()
-    res = Queue.Queue()
+    res = Queue()
     t = threading.Thread(target=go_neg_init, args=(i_dev, r_dev, pin, i_method, i_intent, res))
     t.start()
     logger.debug("Wait for GO Negotiation Request on r_dev")
     ev = r_dev.wait_global_event(["P2P-GO-NEG-REQUEST"], timeout=15)
     if ev is None:
+        t.join()
         raise Exception("GO Negotiation timed out")
     r_dev.dump_monitor()
     logger.debug("Re-initiate GO Negotiation from r_dev")
-    r_res = r_dev.p2p_go_neg_init(i_dev.p2p_dev_addr(), pin, r_method, go_intent=r_intent, timeout=20)
+    try:
+        r_res = r_dev.p2p_go_neg_init(i_dev.p2p_dev_addr(), pin, r_method,
+                                      go_intent=r_intent, timeout=20)
+    except Exception as e:
+        logger.info("go_neg_pin - r_dev.p2p_go_neg_init() exception: " + str(e))
+        t.join()
+        raise
     logger.debug("r_res: " + str(r_res))
     r_dev.dump_monitor()
     t.join()
@@ -284,6 +302,12 @@ def go_neg_pin_authorized(i_dev, r_dev, i_intent=None, r_intent=None,
     r_res = r_dev.p2p_go_neg_auth_result(expect_failure=expect_failure)
     logger.debug("i_res: " + str(i_res))
     logger.debug("r_res: " + str(r_res))
+    if not expect_failure and i_res and r_res and \
+       i_res['result'] == 'success' and r_res['result'] == 'success':
+        if i_res['role'] == 'GO':
+            i_dev.wait_sta(addr=r_dev.p2p_interface_addr())
+        if r_res['role'] == 'GO':
+            r_dev.wait_sta(addr=i_dev.p2p_interface_addr())
     r_dev.dump_monitor()
     i_dev.dump_monitor()
     if i_go_neg_status:
@@ -298,19 +322,20 @@ def go_neg_pin_authorized(i_dev, r_dev, i_intent=None, r_intent=None,
         hwsim_utils.test_connectivity_p2p(r_dev, i_dev)
     return [i_res, r_res]
 
-def go_neg_init_pbc(i_dev, r_dev, i_intent, res, freq, provdisc):
+def go_neg_init_pbc(i_dev, r_dev, i_intent, res, freq, provdisc, timeout=20):
     logger.debug("Initiate GO Negotiation from i_dev")
     try:
         i_res = i_dev.p2p_go_neg_init(r_dev.p2p_dev_addr(), None, "pbc",
-                                      timeout=20, go_intent=i_intent, freq=freq,
-                                      provdisc=provdisc)
+                                      timeout=timeout, go_intent=i_intent,
+                                      freq=freq, provdisc=provdisc)
         logger.debug("i_res: " + str(i_res))
-    except Exception, e:
+    except Exception as e:
         i_res = None
         logger.info("go_neg_init_pbc thread caught an exception from p2p_go_neg_init: " + str(e))
     res.put(i_res)
 
-def go_neg_pbc(i_dev, r_dev, i_intent=None, r_intent=None, i_freq=None, r_freq=None, provdisc=False, r_listen=False):
+def go_neg_pbc(i_dev, r_dev, i_intent=None, r_intent=None, i_freq=None,
+               r_freq=None, provdisc=False, r_listen=False, timeout=30):
     if r_listen:
         r_dev.p2p_listen()
     else:
@@ -318,20 +343,30 @@ def go_neg_pbc(i_dev, r_dev, i_intent=None, r_intent=None, i_freq=None, r_freq=N
     i_dev.p2p_find(social=True)
     logger.info("Start GO negotiation " + i_dev.ifname + " -> " + r_dev.ifname)
     r_dev.dump_monitor()
-    res = Queue.Queue()
-    t = threading.Thread(target=go_neg_init_pbc, args=(i_dev, r_dev, i_intent, res, i_freq, provdisc))
+    res = Queue()
+    t = threading.Thread(target=go_neg_init_pbc, args=(i_dev, r_dev, i_intent,
+                                                       res, i_freq, provdisc,
+                                                       timeout))
     t.start()
     logger.debug("Wait for GO Negotiation Request on r_dev")
-    ev = r_dev.wait_global_event(["P2P-GO-NEG-REQUEST"], timeout=15)
+    ev = r_dev.wait_global_event(["P2P-GO-NEG-REQUEST"], timeout=timeout - 5)
     if ev is None:
+        logger.debug("Wait for P2P-GO-NEG-REQUEST timed out on r_dev - wait for i_dev thread to complete")
+        t.join()
         raise Exception("GO Negotiation timed out")
     r_dev.dump_monitor()
     # Allow some time for the GO Neg Resp to go out before initializing new
     # GO Negotiation.
     time.sleep(0.2)
     logger.debug("Re-initiate GO Negotiation from r_dev")
-    r_res = r_dev.p2p_go_neg_init(i_dev.p2p_dev_addr(), None, "pbc",
-                                  go_intent=r_intent, timeout=20, freq=r_freq)
+    try:
+        r_res = r_dev.p2p_go_neg_init(i_dev.p2p_dev_addr(), None, "pbc",
+                                      go_intent=r_intent, timeout=timeout,
+                                      freq=r_freq)
+    except Exception as e:
+        logger.info("go_neg_pbc - r_dev.p2p_go_neg_init() exception: " + str(e))
+        t.join()
+        raise
     logger.debug("r_res: " + str(r_res))
     r_dev.dump_monitor()
     t.join()
@@ -340,6 +375,7 @@ def go_neg_pbc(i_dev, r_dev, i_intent=None, r_intent=None, i_freq=None, r_freq=N
         raise Exception("go_neg_init_pbc thread failed")
     logger.debug("i_res: " + str(i_res))
     logger.info("Group formed")
+    time.sleep(0.1)
     hwsim_utils.test_connectivity_p2p(r_dev, i_dev)
     i_dev.dump_monitor()
     return [i_res, r_res]
@@ -364,8 +400,12 @@ def go_neg_pbc_authorized(i_dev, r_dev, i_intent=None, r_intent=None,
     logger.info("Group formed")
     return [i_res, r_res]
 
-def remove_group(dev1, dev2):
-    dev1.remove_group()
+def remove_group(dev1, dev2, allow_failure=False):
+    try:
+        dev1.remove_group()
+    except:
+        if not allow_failure:
+            raise
     try:
         dev2.remove_group()
     except:

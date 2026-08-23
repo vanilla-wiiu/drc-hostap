@@ -44,13 +44,6 @@ int eap_server_register_methods(void)
 		ret = eap_server_unauth_tls_register();
 #endif /* EAP_SERVER_TLS */
 
-#ifdef EAP_SERVER_TLS
-#ifdef CONFIG_HS20
-	if (ret == 0)
-		ret = eap_server_wfa_unauth_tls_register();
-#endif /* CONFIG_HS20 */
-#endif /* EAP_SERVER_TLS */
-
 #ifdef EAP_SERVER_MSCHAPV2
 	if (ret == 0)
 		ret = eap_server_mschapv2_register();
@@ -120,6 +113,11 @@ int eap_server_register_methods(void)
 	if (ret == 0)
 		ret = eap_server_fast_register();
 #endif /* EAP_SERVER_FAST */
+
+#ifdef EAP_SERVER_TEAP
+	if (ret == 0)
+		ret = eap_server_teap_register();
+#endif /* EAP_SERVER_TEAP */
 
 #ifdef EAP_SERVER_WSC
 	if (ret == 0)

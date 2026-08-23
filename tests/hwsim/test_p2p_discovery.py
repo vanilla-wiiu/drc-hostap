@@ -7,14 +7,20 @@
 from remotehost import remote_compatible
 import logging
 logger = logging.getLogger()
+import binascii
 import os
+import struct
 import time
 
+import hostapd
 import hwsim_utils
 from wpasupplicant import WpaSupplicant
 from p2p_utils import *
+from hwsim import HWSimRadio
+from tshark import run_tshark
 from test_gas import start_ap
 from test_cfg80211 import nl80211_remain_on_channel
+from test_p2p_channel import set_country
 
 @remote_compatible
 def test_discovery(dev):
@@ -78,8 +84,8 @@ def test_discovery(dev):
     if addr1 not in ev0:
         raise Exception("Dev1 not in provision discovery event")
 
-    dev[0].p2p_stop_find
-    dev[1].p2p_stop_find
+    dev[0].p2p_stop_find()
+    dev[1].p2p_stop_find()
 
     if "FAIL" not in dev[0].p2p_find(dev_id="foo"):
         raise Exception("P2P_FIND with invalid dev_id accepted")
@@ -157,7 +163,7 @@ def test_discovery_group_client(dev):
     # make group client available on operating channe
     dev[1].group_request("REASSOCIATE")
     ev = dev[1].wait_global_event(["CTRL-EVENT-CONNECTED",
-                                   "P2P-GO-NEG-REQUEST"], timeout=10)
+                                   "P2P-GO-NEG-REQUEST"], timeout=15)
     if ev is None:
         raise Exception("Timeout on reconnection to group")
     if "P2P-GO-NEG-REQUEST" not in ev:
@@ -443,6 +449,35 @@ def test_discovery_stop(dev):
     if ev is not None:
         raise Exception("Peer found unexpectedly: " + ev)
 
+def test_discovery_restart(dev):
+    """P2P device discovery and p2p_find restart"""
+    autogo(dev[1], freq=2457)
+    dev[0].p2p_find(social=True)
+    dev[0].p2p_stop_find()
+    dev[0].p2p_find(social=False)
+    ev = dev[0].wait_global_event(["P2P-DEVICE-FOUND"], timeout=7)
+    if ev is None:
+        dev[0].p2p_find(social=False)
+        ev = dev[0].wait_global_event(["P2P-DEVICE-FOUND"], timeout=7)
+        if ev is None:
+            raise Exception("Peer not found")
+
+def test_discovery_restart_progressive(dev):
+    """P2P device discovery and p2p_find type=progressive restart"""
+    try:
+        set_country("US", dev[1])
+        autogo(dev[1], freq=5805)
+        dev[0].p2p_find(social=True)
+        dev[0].p2p_stop_find()
+        dev[0].p2p_find(progressive=True)
+        ev = dev[0].wait_global_event(["P2P-DEVICE-FOUND"], timeout=20)
+        dev[1].remove_group()
+        if ev is None:
+            raise Exception("Peer not found")
+    finally:
+        set_country("00")
+        dev[1].flush_scan_cache()
+
 def test_p2p_peer_command(dev):
     """P2P_PEER command"""
     addr0 = dev[0].p2p_dev_addr()
@@ -460,11 +495,11 @@ def test_p2p_peer_command(dev):
 
     res0 = dev[0].request("P2P_PEER FIRST")
     peer = res0.splitlines()[0]
-    if peer not in [ addr1, addr2 ]:
+    if peer not in [addr1, addr2]:
         raise Exception("Unexpected P2P_PEER FIRST address")
     res1 = dev[0].request("P2P_PEER NEXT-" + peer)
     peer2 = res1.splitlines()[0]
-    if peer2 not in [ addr1, addr2 ] or peer == peer2:
+    if peer2 not in [addr1, addr2] or peer == peer2:
         raise Exception("Unexpected P2P_PEER NEXT address")
 
     if "FAIL" not in dev[0].request("P2P_PEER NEXT-foo"):
@@ -621,3 +656,216 @@ def test_discovery_long_listen(dev):
 
     dev[1].p2p_stop_find()
     wpas.p2p_stop_find()
+
+def test_discovery_long_listen2(dev):
+    """Long P2P_LISTEN longer than remain-on-channel time"""
+    with HWSimRadio(use_p2p_device=True) as (radio, iface):
+        wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+        wpas.interface_add(iface)
+        addr = wpas.p2p_dev_addr()
+        wpas.request("P2P_LISTEN 15")
+
+        # Wait for remain maximum remain-on-channel time to pass
+        time.sleep(7)
+
+        if not dev[0].discover_peer(addr):
+            raise Exception("Device discovery timed out")
+        dev[0].p2p_stop_find()
+        wpas.p2p_stop_find()
+
+def pd_test(dev, addr):
+    if not dev.discover_peer(addr, freq=2412):
+        raise Exception("Device discovery timed out")
+    dev.global_request("P2P_PROV_DISC " + addr + " display")
+    ev0 = dev.wait_global_event(["P2P-PROV-DISC-ENTER-PIN"], timeout=15)
+    if ev0 is None:
+        raise Exception("Provision discovery timed out (display)")
+    dev.p2p_stop_find()
+
+def run_discovery_while_go(wpas, dev, params):
+    wpas.request("P2P_SET listen_channel 1")
+    wpas.p2p_start_go(freq="2412")
+    addr = wpas.p2p_dev_addr()
+    pin = dev[0].wps_read_pin()
+    wpas.p2p_go_authorize_client(pin)
+    dev[1].p2p_connect_group(addr, pin, freq=2412, timeout=30)
+
+    pd_test(dev[0], addr)
+    wpas.p2p_listen()
+    pd_test(dev[2], addr)
+
+    wpas.p2p_stop_find()
+    terminate_group(wpas, dev[1])
+
+    out = run_tshark(os.path.join(params['logdir'], "hwsim0.pcapng"),
+                     "wifi_p2p.public_action.subtype == 8", ["wlan.da"])
+    da = out.splitlines()
+    logger.info("PD Response DAs: " + str(da))
+    if len(da) != 3:
+        raise Exception("Unexpected DA count for PD Response")
+
+def test_discovery_while_go(dev, apdev, params):
+    """P2P provision discovery from GO"""
+    wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+    wpas.interface_add("wlan5")
+    run_discovery_while_go(wpas, dev, params)
+
+def test_discovery_while_go_p2p_dev(dev, apdev, params):
+    """P2P provision discovery from GO (using P2P Device interface)"""
+    with HWSimRadio(use_p2p_device=True) as (radio, iface):
+        wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+        wpas.interface_add(iface)
+        run_discovery_while_go(wpas, dev, params)
+
+def run_discovery_while_cli(wpas, dev, params):
+    wpas.request("P2P_SET listen_channel 1")
+    dev[1].p2p_start_go(freq="2412")
+    addr = wpas.p2p_dev_addr()
+    pin = wpas.wps_read_pin()
+    dev[1].p2p_go_authorize_client(pin)
+    wpas.p2p_connect_group(dev[1].p2p_dev_addr(), pin, freq=2412, timeout=30)
+
+    pd_test(dev[0], addr)
+    wpas.p2p_listen()
+    pd_test(dev[2], addr)
+
+    wpas.p2p_stop_find()
+    terminate_group(dev[1], wpas)
+
+    out = run_tshark(os.path.join(params['logdir'], "hwsim0.pcapng"),
+                     "wifi_p2p.public_action.subtype == 8", ["wlan.da"])
+    da = out.splitlines()
+    logger.info("PD Response DAs: " + str(da))
+    if len(da) != 3:
+        raise Exception("Unexpected DA count for PD Response")
+
+def test_discovery_while_cli(dev, apdev, params):
+    """P2P provision discovery from CLI"""
+    wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+    wpas.interface_add("wlan5")
+    run_discovery_while_cli(wpas, dev, params)
+
+def test_discovery_while_cli_p2p_dev(dev, apdev, params):
+    """P2P provision discovery from CLI (using P2P Device interface)"""
+    with HWSimRadio(use_p2p_device=True) as (radio, iface):
+        wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+        wpas.interface_add(iface)
+        run_discovery_while_cli(wpas, dev, params)
+
+def test_discovery_device_name_change(dev):
+    """P2P device discovery and peer changing device name"""
+    wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+    wpas.interface_add("wlan5")
+    wpas.set("device_name", "test-a")
+    wpas.p2p_listen()
+    dev[0].p2p_find(social=True)
+    ev = dev[0].wait_global_event(["P2P-DEVICE-FOUND"], timeout=15)
+    if ev is None:
+        raise Exception("Peer not found")
+    if "new=1" not in ev:
+        raise Exception("Incorrect new event: " + ev)
+    if "name='test-a'" not in ev:
+        raise Exception("Unexpected device name(1): " + ev)
+
+    # Verify that new P2P-DEVICE-FOUND event is indicated when the peer changes
+    # its device name.
+    wpas.set("device_name", "test-b")
+    ev = dev[0].wait_global_event(["P2P-DEVICE-FOUND"], timeout=15)
+    if ev is None:
+        raise Exception("Peer update not seen")
+    if "new=0" not in ev:
+        raise Exception("Incorrect update event: " + ev)
+    if "name='test-b'" not in ev:
+        raise Exception("Unexpected device name(2): " + ev)
+    wpas.p2p_stop_find()
+    dev[0].p2p_stop_find()
+
+def test_p2p_group_cli_invalid(dev, apdev):
+    """P2P device discovery with invalid group client info"""
+    attr = struct.pack('<BHBB', 2, 2, 0x25, 0x09)
+
+    attr += struct.pack('<BH', 3, 6) + "\x02\x02\x02\x02\x02\x00".encode()
+
+    cli = bytes()
+    cli += "\x02\x02\x02\x02\x02\x03".encode()
+    cli += "\x02\x02\x02\x02\x02\x04".encode()
+    cli += struct.pack('>BH', 0, 0x3148)
+    dev_type = "\x00\x00\x00\x00\x00\x00\x00\x01".encode()
+    cli += dev_type
+    num_sec = 25
+    cli += struct.pack('B', num_sec)
+    cli += num_sec * dev_type
+    name = "TEST".encode()
+    cli += struct.pack('>HH', 0x1011, len(name)) + name
+    desc = struct.pack('B', len(cli)) + cli
+    attr += struct.pack('<BH', 14, len(desc)) + desc
+
+    p2p_ie = struct.pack('>BBL', 0xdd, 4 + len(attr), 0x506f9a09) + attr
+    ie = binascii.hexlify(p2p_ie).decode()
+
+    params = {"ssid": "DIRECT-test",
+              "eap_server": "1",
+              "wps_state": "2",
+              "wpa_passphrase": "12345678",
+              "wpa": "2",
+              "wpa_key_mgmt": "WPA-PSK",
+              "rsn_pairwise": "CCMP",
+              "vendor_elements": ie}
+    hapd = hostapd.add_ap(apdev[0], params)
+
+    for i in range(2):
+        dev[i].p2p_find(social=True)
+        ev = dev[i].wait_global_event(["P2P-DEVICE-FOUND"], timeout=5)
+        if not ev:
+            raise Exception("P2P device not found")
+
+def test_discovery_max_peers(dev):
+    """P2P device discovery and maximum peer limit exceeded"""
+    dev[0].p2p_listen()
+    dev[0].request("SET ext_mgmt_frame_handling 1")
+    probereq1 = "40000000ffffffffffff"
+    probereq2 = "ffffffffffff000000074449524543542d01080c1218243048606c0301012d1afe131bffff000000000000000000000100000000000000000000ff16230178c812400000bfce0000000000000000fafffaffdd730050f204104a000110103a00010110080002314810470010572cf82fc95756539b16b5cfb298abf1105400080000000000000000103c0001031002000200001009000200001012000200001021000120102300012010240001201011000844657669636520421049000900372a000120030101dd11506f9a0902020025000605005858045106"
+
+    # Fill the P2P peer table with max+1 entries based on Probe Request frames
+    # to verify correct behavior on# removing the oldest entry when running out
+    # of room.
+    for i in range(101):
+        addr = "0202020202%02x" % i
+        probereq = probereq1 + addr + probereq2
+        if "OK" not in dev[0].request("MGMT_RX_PROCESS freq=2412 datarate=60 ssi_signal=-30 frame=" + probereq):
+            raise Exception("MGMT_RX_PROCESS failed")
+
+    res = dev[0].global_request("P2P_PEER FIRST")
+    addr = res.splitlines()[0]
+    peers = [addr]
+    limit = 200
+    while limit > 0:
+        res = dev[0].global_request("P2P_PEER NEXT-" + addr)
+        addr = res.splitlines()[0]
+        if addr == "FAIL":
+            break
+        peers.append(addr)
+        limit -= 1
+    logger.info("Peers: " + str(peers))
+
+    if len(peers) != 100:
+        raise Exception("Unexpected number of peer entries")
+    oldest = "02:02:02:02:02:00"
+    if oldest in peers:
+        raise Exception("Oldest entry is still present")
+    for i in range(101):
+        addr = "02:02:02:02:02:%02x" % i
+        if addr == oldest:
+            continue
+        if addr not in peers:
+            raise Exception("Peer missing from table: " + addr)
+
+    # Provision Discovery Request from the oldest peer (SA) using internally
+    # different P2P Device Address as a regression test for incorrect processing
+    # for this corner case.
+    dst = dev[0].own_addr().replace(':', '')
+    src = peers[99].replace(':', '')
+    devaddr = "0202020202ff"
+    pdreq = "d0004000" + dst + src + dst + "d0000409506f9a090701dd29506f9a0902020025000d1d00" + devaddr + "1108000000000000000000101100084465766963652041dd0a0050f204100800020008"
+    if "OK" not in dev[0].request("MGMT_RX_PROCESS freq=2412 datarate=60 ssi_signal=-30 frame=" + pdreq):
+        raise Exception("MGMT_RX_PROCESS failed")

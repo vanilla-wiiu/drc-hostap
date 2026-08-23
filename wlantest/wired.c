@@ -87,16 +87,17 @@ static void process_radius_access_request(struct wlantest *wt, u32 dst,
 }
 
 
-static void wlantest_add_pmk(struct wlantest *wt, const u8 *pmk)
+static void wlantest_add_pmk(struct wlantest *wt, const u8 *pmk, size_t pmk_len)
 {
 	struct wlantest_pmk *p;
 
 	p = os_zalloc(sizeof(*p));
 	if (p == NULL)
 		return;
-	os_memcpy(p->pmk, pmk, 32);
+	os_memcpy(p->pmk, pmk, pmk_len);
+	p->pmk_len = pmk_len;
 	dl_list_add(&wt->pmk, &p->list);
-	wpa_hexdump(MSG_INFO, "Add PMK", pmk, 32);
+	wpa_hexdump(MSG_INFO, "Add PMK", pmk, pmk_len);
 }
 
 
@@ -127,20 +128,25 @@ static void process_radius_access_accept(struct wlantest *wt, u32 dst, u32 src,
 					      (u8 *) s->secret,
 					      os_strlen(s->secret));
 		if (keys && keys->send && keys->recv) {
-			u8 pmk[32];
+			u8 pmk[PMK_LEN_MAX];
+			size_t pmk_len, len2;
+
 			wpa_hexdump_key(MSG_DEBUG, "MS-MPPE-Send-Key",
 					keys->send, keys->send_len);
 			wpa_hexdump_key(MSG_DEBUG, "MS-MPPE-Recv-Key",
 					keys->recv, keys->recv_len);
-			os_memcpy(pmk, keys->recv,
-				  keys->recv_len > 32 ? 32 : keys->recv_len);
-			if (keys->recv_len < 32) {
-				os_memcpy(pmk + keys->recv_len,
-					  keys->send,
-					  keys->recv_len + keys->send_len > 32
-					  ? 32 : 32 - keys->recv_len);
+			pmk_len = keys->recv_len;
+			if (pmk_len > PMK_LEN_MAX)
+				pmk_len = PMK_LEN_MAX;
+			os_memcpy(pmk, keys->recv, pmk_len);
+			if (pmk_len < PMK_LEN_MAX) {
+				len2 = keys->send_len;
+				if (pmk_len + len2 > PMK_LEN_MAX)
+					len2 = PMK_LEN_MAX - pmk_len;
+				os_memcpy(pmk + pmk_len, keys->send, len2);
+				pmk_len += len2;
 			}
-			wlantest_add_pmk(wt, pmk);
+			wlantest_add_pmk(wt, pmk, pmk_len);
 			found = 1;
 		}
 
@@ -206,9 +212,9 @@ static void process_udp(struct wlantest *wt, u32 dst, u32 src,
 		return;
 	udp = (const struct udphdr *) data;
 	/* TODO: check UDP checksum */
-	sport = be_to_host16(udp->source);
-	dport = be_to_host16(udp->dest);
-	ulen = be_to_host16(udp->len);
+	sport = be_to_host16(udp->uh_sport);
+	dport = be_to_host16(udp->uh_dport);
+	ulen = be_to_host16(udp->uh_ulen);
 
 	if (ulen > len)
 		return;
@@ -225,43 +231,44 @@ static void process_udp(struct wlantest *wt, u32 dst, u32 src,
 
 static void process_ipv4(struct wlantest *wt, const u8 *data, size_t len)
 {
-	const struct iphdr *ip;
+	const struct ip *ip;
 	const u8 *payload;
 	size_t plen;
-	u16 frag_off, tot_len;
+	uint16_t frag_off, ip_len;
 
 	if (len < sizeof(*ip))
 		return;
 
-	ip = (const struct iphdr *) data;
-	if (ip->version != 4)
+	ip = (const struct ip *) data;
+	if (ip->ip_v != 4)
 		return;
-	if (ip->ihl < 5)
+	if (ip->ip_hl < 5)
 		return;
 
 	/* TODO: check header checksum in ip->check */
 
-	frag_off = be_to_host16(ip->frag_off);
+	frag_off = be_to_host16(ip->ip_off);
 	if (frag_off & 0x1fff) {
 		wpa_printf(MSG_EXCESSIVE, "IP fragment reassembly not yet "
 			   "supported");
 		return;
 	}
 
-	tot_len = be_to_host16(ip->tot_len);
-	if (tot_len > len)
+	ip_len = be_to_host16(ip->ip_len);
+	if (ip_len > len)
 		return;
-	if (tot_len < len)
-		len = tot_len;
+	if (ip_len < len)
+		len = ip_len;
 
-	payload = data + 4 * ip->ihl;
-	plen = len - 4 * ip->ihl;
+	payload = data + 4 * ip->ip_hl;
+	plen = len - 4 * ip->ip_hl;
 	if (payload + plen > data + len)
 		return;
 
-	switch (ip->protocol) {
+	switch (ip->ip_p) {
 	case IPPROTO_UDP:
-		process_udp(wt, ip->daddr, ip->saddr, payload, plen);
+		process_udp(wt, ip->ip_dst.s_addr, ip->ip_src.s_addr,
+			    payload, plen);
 		break;
 	}
 }

@@ -9,13 +9,14 @@ logger = logging.getLogger()
 
 import hostapd
 import hwsim_utils
-from utils import skip_with_fips
+from utils import *
 
 def test_ap_mixed_security(dev, apdev):
     """WPA/WPA2 with PSK, EAP, SAE, FT in a single BSS"""
     skip_with_fips(dev[0])
+    skip_without_tkip(dev[0])
     dev[0].flush_scan_cache()
-    sae = "SAE" in dev[0].get_capability("auth_alg")
+    sae = "SAE" in dev[2].get_capability("auth_alg")
     ssid = "test-mixed"
     passphrase = 'qwertyuiop'
     params = hostapd.wpa_mixed_params(ssid=ssid, passphrase=passphrase)
@@ -33,6 +34,7 @@ def test_ap_mixed_security(dev, apdev):
                    password="abcdefghijklmnop0123456789abcdef",
                    scan_freq="2412")
     if sae:
+        dev[2].request("SET sae_groups ")
         dev[2].connect(ssid, psk=passphrase, key_mgmt="SAE", scan_freq="2412")
 
     logger.debug(dev[0].request("SCAN_RESULTS"))
@@ -52,6 +54,7 @@ def test_ap_mixed_security(dev, apdev):
     if sae and dev[2].get_status_field("key_mgmt") != "SAE":
         raise Exception("Unexpected key_mgmt(3)")
 
+    time.sleep(0.1) # give it time for AP to set up stations fully
     hwsim_utils.test_connectivity(dev[0], dev[1])
     if sae:
         hwsim_utils.test_connectivity(dev[1], dev[2])
@@ -97,3 +100,23 @@ def test_ap_mixed_security(dev, apdev):
         raise Exception("Unexpected key_mgmt(2c)")
     if sae and dev[2].get_status_field("key_mgmt") != "FT-SAE":
         raise Exception("Unexpected key_mgmt(3c)")
+
+def test_ap_mixed_security_wpa_sae(dev, apdev):
+    """WPAv1(PSK-CCMP) and WPA3(SAE-CCMP) in a single BSS"""
+    check_sae_capab(dev[0])
+    ssid = "test-mixed"
+    passphrase = 'qwertyuiop'
+    params = hostapd.wpa_mixed_params(ssid=ssid, passphrase=passphrase)
+    params['wpa_key_mgmt'] = "WPA-PSK SAE"
+    params['wpa_pairwise'] = "CCMP"
+    params['rsn_pairwise'] = "CCMP"
+    # Remove WPA-PSK from RSNE
+    rsne = "30140100000fac040100000fac040100000fac080c00"
+    wpaie = "dd160050f20101000050f20401000050f20401000050f202"
+    params['own_ie_override'] = rsne + wpaie
+    hapd = hostapd.add_ap(apdev[0], params)
+
+    dev[0].set("sae_groups", "")
+    dev[0].connect(ssid, psk=passphrase, key_mgmt="SAE", scan_freq="2412")
+    dev[1].connect(ssid, key_mgmt="WPA-PSK", proto="WPA",
+                   psk=passphrase, scan_freq="2412")

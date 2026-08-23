@@ -97,9 +97,6 @@ static const u64 K[80] = {
 #define Sigma1(x)       (S(x, 14) ^ S(x, 18) ^ S(x, 41))
 #define Gamma0(x)       (S(x, 1) ^ S(x, 8) ^ R(x, 7))
 #define Gamma1(x)       (S(x, 19) ^ S(x, 61) ^ R(x, 6))
-#ifndef MIN
-#define MIN(x, y) (((x) < (y)) ? (x) : (y))
-#endif
 
 #define ROR64c(x, y) \
     ( ((((x) & CONST64(0xFFFFFFFFFFFFFFFF)) >> ((u64) (y) & CONST64(63))) | \
@@ -109,8 +106,13 @@ static const u64 K[80] = {
 /* compress 1024-bits */
 static int sha512_compress(struct sha512_state *md, unsigned char *buf)
 {
-	u64 S[8], W[80], t0, t1;
+	u64 S[8], t0, t1;
+	u64 *W;
 	int i;
+
+	W = os_malloc(80 * sizeof(u64));
+	if (!W)
+		return -1;
 
 	/* copy state into S */
 	for (i = 0; i < 8; i++) {
@@ -146,6 +148,7 @@ static int sha512_compress(struct sha512_state *md, unsigned char *buf)
 		md->state[i] = md->state[i] + S[i];
 	}
 
+	os_free(W);
 	return 0;
 }
 

@@ -246,10 +246,10 @@ static void node_to_tnds(struct xml_node_ctx *ctx, xml_node_t *out,
 			xml_node_create_text(ctx, tnds, NULL, "Path", uri);
 
 		val = get_val(ctx, node);
-		if (val) {
-			xml_node_create_text(ctx, tnds, NULL, "Value", val);
-			xml_node_get_text_free(ctx, val);
-		}
+		if (val || !xml_node_first_child(ctx, node))
+			xml_node_create_text(ctx, tnds, NULL, "Value",
+					     val ? val : "");
+		xml_node_get_text_free(ctx, val);
 
 		new_uri = add_path(uri, name);
 		node_to_tnds(ctx, new_uri ? out : tnds, node, new_uri);
@@ -437,35 +437,4 @@ xml_node_t * tnds_to_mo(struct xml_node_ctx *ctx, xml_node_t *tnds)
 	if (!node)
 		return NULL;
 	return tnds_to_mo_iter(ctx, NULL, node, NULL);
-}
-
-
-xml_node_t * soap_build_envelope(struct xml_node_ctx *ctx, xml_node_t *node)
-{
-	xml_node_t *envelope, *body;
-	xml_namespace_t *ns;
-
-	envelope = xml_node_create_root(
-		ctx, "http://www.w3.org/2003/05/soap-envelope", "soap12", &ns,
-		"Envelope");
-	if (envelope == NULL)
-		return NULL;
-	body = xml_node_create(ctx, envelope, ns, "Body");
-	xml_node_add_child(ctx, body, node);
-	return envelope;
-}
-
-
-xml_node_t * soap_get_body(struct xml_node_ctx *ctx, xml_node_t *soap)
-{
-	xml_node_t *body, *child;
-
-	body = get_node_uri(ctx, soap, "Envelope/Body");
-	if (body == NULL)
-		return NULL;
-	xml_node_for_each_child(ctx, child, body) {
-		xml_node_for_each_check(ctx, child);
-		return child;
-	}
-	return NULL;
 }

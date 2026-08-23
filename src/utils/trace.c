@@ -6,12 +6,18 @@
  * See README for more details.
  */
 
+#ifdef WPA_TRACE_BFD
+#define _GNU_SOURCE
+#include <link.h>
+#endif /* WPA_TRACE_BCD */
 #include "includes.h"
 
 #include "common.h"
 #include "trace.h"
 
 #ifdef WPA_TRACE
+
+const char *current_btrace_ctx;
 
 static struct dl_list active_references =
 { &active_references, &active_references };
@@ -25,6 +31,28 @@ static struct dl_list active_references =
 static char *prg_fname = NULL;
 static bfd *cached_abfd = NULL;
 static asymbol **syms = NULL;
+static unsigned long start_offset;
+static int start_offset_looked_up;
+
+
+static int callback(struct dl_phdr_info *info, size_t size, void *data)
+{
+	/*
+	 * dl_iterate_phdr(3):
+	 * "The first object visited by callback is the main program."
+	 */
+	start_offset = info->dlpi_addr;
+
+	/*
+	 * dl_iterate_phdr(3):
+	 * "The dl_iterate_phdr() function walks through the list of an
+	 *  application's shared objects and calls the function callback
+	 *  once for each object, until either all shared objects have
+	 *  been processed or callback returns a nonzero value."
+	 */
+	return 1;
+}
+
 
 static void get_prg_fname(void)
 {
@@ -120,6 +148,17 @@ struct bfd_data {
 	unsigned int line;
 };
 
+/*
+ * binutils removed the bfd parameter and renamed things but
+ * those were macros so we can detect their absence.
+ * Cf. https://sourceware.org/git/gitweb.cgi?p=binutils-gdb.git;a=commitdiff;h=fd3619828e94a24a92cddec42cbc0ab33352eeb4;hp=5dfda3562a69686c43aad4fb0269cc9d5ec010d5
+ */
+#ifndef bfd_get_section_vma
+#define bfd_get_section_vma(bfd, section) bfd_section_vma(section)
+#endif
+#ifndef bfd_get_section_size
+#define bfd_get_section_size bfd_section_size
+#endif
 
 static void find_addr_sect(bfd *abfd, asection *section, void *obj)
 {
@@ -160,7 +199,9 @@ static void wpa_trace_bfd_addr(void *pc)
 	if (abfd == NULL)
 		return;
 
-	data.pc = (bfd_hostptr_t) pc;
+	if (start_offset > (uintptr_t) pc)
+		return;
+	data.pc = (uintptr_t) ((u8 *) pc - start_offset);
 	data.found = FALSE;
 	bfd_map_over_sections(abfd, find_addr_sect, &data);
 
@@ -201,7 +242,9 @@ static const char * wpa_trace_bfd_addr2func(void *pc)
 	if (abfd == NULL)
 		return NULL;
 
-	data.pc = (bfd_hostptr_t) pc;
+	if (start_offset > (uintptr_t) pc)
+		return NULL;
+	data.pc = (uintptr_t) ((u8 *) pc - start_offset);
 	data.found = FALSE;
 	bfd_map_over_sections(abfd, find_addr_sect, &data);
 
@@ -232,6 +275,11 @@ static void wpa_trace_bfd_init(void)
 	if (!syms) {
 		wpa_printf(MSG_INFO, "Failed to read symbols");
 		return;
+	}
+
+	if (!start_offset_looked_up) {
+		dl_iterate_phdr(callback, NULL);
+		start_offset_looked_up = 1;
 	}
 }
 
@@ -268,7 +316,9 @@ size_t wpa_trace_calling_func(const char *buf[], size_t len)
 	for (i = 0; i < btrace_num; i++) {
 		struct bfd_data data;
 
-		data.pc = (bfd_hostptr_t) btrace_res[i];
+		if (start_offset > (uintptr_t) btrace_res[i])
+			continue;
+		data.pc = (uintptr_t) ((u8 *) btrace_res[i] - start_offset);
 		data.found = FALSE;
 		bfd_map_over_sections(abfd, find_addr_sect, &data);
 
@@ -298,7 +348,8 @@ size_t wpa_trace_calling_func(const char *buf[], size_t len)
 
 #endif /* WPA_TRACE_BFD */
 
-void wpa_trace_dump_func(const char *title, void **btrace, int btrace_num)
+void wpa_trace_dump_func(const char *title, void **btrace, int btrace_num,
+			 const char *btrace_ctx)
 {
 	char **sym;
 	int i;
@@ -330,6 +381,9 @@ void wpa_trace_dump_func(const char *title, void **btrace, int btrace_num)
 			state = TRACE_TAIL;
 	}
 	free(sym);
+	if (btrace_ctx)
+		wpa_printf(MSG_INFO, "WPA_TRACE: External context: %s",
+			   btrace_ctx);
 	wpa_printf(MSG_INFO, "WPA_TRACE: %s - END", title);
 }
 
@@ -370,8 +424,41 @@ void wpa_trace_check_ref(const void *addr)
 void wpa_trace_deinit(void)
 {
 #ifdef WPA_TRACE_BFD
+	free(prg_fname);
+	prg_fname = NULL;
+
 	free(syms);
 	syms = NULL;
+	if (cached_abfd) {
+		bfd_close(cached_abfd);
+		cached_abfd = NULL;
+	}
+#endif /* WPA_TRACE_BFD */
+}
+
+struct btrace_ctx_entry {
+	struct dl_list list;
+	char ctx[];
+};
+static struct dl_list old_btrace_ctxs = DL_LIST_HEAD_INIT(old_btrace_ctxs);
+
+void wpa_trace_set_context(const char *ctx)
+{
+#ifdef WPA_TRACE_BFD
+	/*
+	 * Old values might still be referenced, keep them in a list so that
+	 * they are not freed and so that a reference exists for the sanitizer.
+	 */
+	if (ctx) {
+		struct btrace_ctx_entry *entry;
+
+		entry = malloc(sizeof(*entry) + os_strlen(ctx) + 1);
+		strcpy(entry->ctx, ctx);
+		dl_list_add(&old_btrace_ctxs, &entry->list);
+
+		current_btrace_ctx = entry->ctx;
+	} else
+		current_btrace_ctx = NULL;
 #endif /* WPA_TRACE_BFD */
 }
 

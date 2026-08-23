@@ -16,9 +16,12 @@
 struct wpa_global;
 struct wpa_supplicant;
 struct wpa_ssid;
+struct wpa_cred;
+struct wpa_bss;
 struct wps_event_m2d;
 struct wps_event_fail;
 struct wps_credential;
+enum nan_service_protocol_type;
 
 enum wpas_dbus_prop {
 	WPAS_DBUS_PROP_AP_SCAN,
@@ -28,8 +31,17 @@ enum wpas_dbus_prop {
 	WPAS_DBUS_PROP_CURRENT_NETWORK,
 	WPAS_DBUS_PROP_CURRENT_AUTH_MODE,
 	WPAS_DBUS_PROP_BSSS,
+	WPAS_DBUS_PROP_STATIONS,
 	WPAS_DBUS_PROP_DISCONNECT_REASON,
+	WPAS_DBUS_PROP_AUTH_STATUS_CODE,
 	WPAS_DBUS_PROP_ASSOC_STATUS_CODE,
+	WPAS_DBUS_PROP_ROAM_TIME,
+	WPAS_DBUS_PROP_ROAM_COMPLETE,
+	WPAS_DBUS_PROP_SCAN_IN_PROGRESS_6GHZ,
+	WPAS_DBUS_PROP_SESSION_LENGTH,
+	WPAS_DBUS_PROP_BSS_TM_STATUS,
+	WPAS_DBUS_PROP_MAC_ADDRESS,
+	WPAS_DBUS_PROP_SIGNAL_CHANGE,
 };
 
 enum wpas_dbus_bss_prop {
@@ -43,6 +55,11 @@ enum wpas_dbus_bss_prop {
 	WPAS_DBUS_BSS_PROP_WPS,
 	WPAS_DBUS_BSS_PROP_IES,
 	WPAS_DBUS_BSS_PROP_AGE,
+	WPAS_DBUS_BSS_PROP_ANQP,
+};
+
+enum wpas_dbus_sta_prop {
+	WPAS_DBUS_STA_PROP_ADDRESS,
 };
 
 #define WPAS_DBUS_OBJECT_PATH_MAX 150
@@ -61,8 +78,13 @@ enum wpas_dbus_bss_prop {
 #define WPAS_DBUS_NEW_BSSIDS_PART "BSSs"
 #define WPAS_DBUS_NEW_IFACE_BSS	WPAS_DBUS_NEW_INTERFACE ".BSS"
 
+#define WPAS_DBUS_NEW_STAS_PART "Stations"
+#define WPAS_DBUS_NEW_IFACE_STA	WPAS_DBUS_NEW_INTERFACE ".Station"
+
 #define WPAS_DBUS_NEW_IFACE_P2PDEVICE	\
 		WPAS_DBUS_NEW_IFACE_INTERFACE ".P2PDevice"
+
+#define WPAS_DBUS_NEW_IFACE_MESH WPAS_DBUS_NEW_IFACE_INTERFACE ".Mesh"
 
 /*
  * Groups correspond to P2P groups where this device is a GO (owner)
@@ -80,6 +102,9 @@ enum wpas_dbus_bss_prop {
 
 #define WPAS_DBUS_NEW_P2P_PEERS_PART	"Peers"
 #define	WPAS_DBUS_NEW_IFACE_P2P_PEER WPAS_DBUS_NEW_INTERFACE ".Peer"
+
+#define WPAS_DBUS_NEW_CREDENTIALS_PART "Credentials"
+#define WPAS_DBUS_NEW_IFACE_CREDENTIAL WPAS_DBUS_NEW_INTERFACE ".Credential"
 
 /* Top-level Errors */
 #define WPAS_DBUS_ERROR_UNKNOWN_ERROR \
@@ -161,6 +186,8 @@ int wpas_dbus_unregister_bss(struct wpa_supplicant *wpa_s,
 			     u8 bssid[ETH_ALEN], unsigned int id);
 int wpas_dbus_register_bss(struct wpa_supplicant *wpa_s,
 			   u8 bssid[ETH_ALEN], unsigned int id);
+int wpas_dbus_unregister_sta(struct wpa_supplicant *wpa_s, const u8 *sta);
+int wpas_dbus_register_sta(struct wpa_supplicant *wpa_s, const u8 *sta);
 void wpas_dbus_signal_blob_added(struct wpa_supplicant *wpa_s,
 				 const char *name);
 void wpas_dbus_signal_blob_removed(struct wpa_supplicant *wpa_s,
@@ -190,7 +217,8 @@ void wpas_dbus_signal_p2p_go_neg_req(struct wpa_supplicant *wpa_s,
 				     const u8 *src, u16 dev_passwd_id,
 				     u8 go_intent);
 void wpas_dbus_signal_p2p_group_started(struct wpa_supplicant *wpa_s,
-					int client, int persistent);
+					int client, int persistent,
+					const u8 *ip);
 void wpas_dbus_signal_p2p_group_formation_failure(struct wpa_supplicant *wpa_s,
 						  const char *reason);
 void wpas_dbus_register_p2p_group(struct wpa_supplicant *wpa_s,
@@ -229,6 +257,8 @@ void wpas_dbus_signal_preq(struct wpa_supplicant *wpa_s,
 			   const u8 *ie, size_t ie_len, u32 ssi_signal);
 void wpas_dbus_signal_eap_status(struct wpa_supplicant *wpa_s,
 				 const char *status, const char *parameter);
+void wpas_dbus_signal_psk_mismatch(struct wpa_supplicant *wpa_s);
+void wpas_dbus_signal_sae_password_mismatch(struct wpa_supplicant *wpa_s);
 void wpas_dbus_signal_sta_authorized(struct wpa_supplicant *wpa_s,
 				     const u8 *sta);
 void wpas_dbus_signal_sta_deauthorized(struct wpa_supplicant *wpa_s,
@@ -237,6 +267,53 @@ void wpas_dbus_signal_p2p_invitation_received(struct wpa_supplicant *wpa_s,
 					      const u8 *sa, const u8 *dev_addr,
 					      const u8 *bssid, int id,
 					      int op_freq);
+void wpas_dbus_signal_p2p_bootstrap_req(struct wpa_supplicant *wpa_s,
+					const u8 *src, u16 bootstrap_method);
+void wpas_dbus_signal_p2p_bootstrap_rsp(struct wpa_supplicant *wpa_s,
+					const u8 *src, int status,
+					u16 bootstrap_method);
+void wpas_dbus_signal_mesh_group_started(struct wpa_supplicant *wpa_s,
+					 struct wpa_ssid *ssid);
+void wpas_dbus_signal_mesh_group_removed(struct wpa_supplicant *wpa_s,
+					 const u8 *meshid, u8 meshid_len,
+					 int reason);
+void wpas_dbus_signal_mesh_peer_connected(struct wpa_supplicant *wpa_s,
+					  const u8 *peer_addr);
+void wpas_dbus_signal_mesh_peer_disconnected(struct wpa_supplicant *wpa_s,
+					     const u8 *peer_addr, int reason);
+void wpas_dbus_signal_interworking_ap_added(struct wpa_supplicant *wpa_s,
+					    struct wpa_bss *bss,
+					    struct wpa_cred *cred,
+					    const char *type, int excluded,
+					    int bh, int bss_load,
+					    int conn_capab);
+void wpas_dbus_signal_interworking_select_done(struct wpa_supplicant *wpa_s);
+void wpas_dbus_signal_anqp_query_done(struct wpa_supplicant *wpa_s,
+				      const u8 *dst, const char *result);
+void wpas_dbus_signal_hs20_t_c_acceptance(struct wpa_supplicant *wpa_s,
+					  const char *url);
+void wpas_dbus_signal_nan_discovery_result(struct wpa_supplicant *wpa_s,
+					   enum nan_service_protocol_type
+					   srv_proto_type,
+					   int subscribe_id,
+					   int peer_publish_id,
+					   const u8 *peer_addr,
+					   bool fsd, bool fsd_gas,
+					   const u8 *ssi, size_t ssi_len);
+void wpas_dbus_signal_nan_replied(struct wpa_supplicant *wpa_s,
+				  enum nan_service_protocol_type srv_proto_type,
+				  int publish_id, int peer_subscribe_id,
+				  const u8 *peer_addr,
+				  const u8 *ssi, size_t ssi_len);
+void wpas_dbus_signal_nan_receive(struct wpa_supplicant *wpa_s, int id,
+				  int peer_id, const u8 *peer_addr,
+				  const u8 *ssi, size_t ssi_len);
+void wpas_dbus_signal_nan_publish_terminated(struct wpa_supplicant *wpa_s,
+					     int publish_id,
+					     const char *reason);
+void wpas_dbus_signal_nan_subscribe_terminated(struct wpa_supplicant *wpa_s,
+					       int subscribe_id,
+					       const char *reason);
 
 #else /* CONFIG_CTRL_IFACE_DBUS_NEW */
 
@@ -333,6 +410,18 @@ static inline int wpas_dbus_register_bss(struct wpa_supplicant *wpa_s,
 	return 0;
 }
 
+static inline int wpas_dbus_unregister_sta(struct wpa_supplicant *wpa_s,
+					   const u8 *sta)
+{
+	return 0;
+}
+
+static inline int wpas_dbus_register_sta(struct wpa_supplicant *wpa_s,
+					 const u8 *sta)
+{
+	return 0;
+}
+
 static inline void wpas_dbus_signal_blob_added(struct wpa_supplicant *wpa_s,
 					       const char *name)
 {
@@ -400,7 +489,8 @@ static inline void wpas_dbus_signal_p2p_go_neg_req(struct wpa_supplicant *wpa_s,
 
 static inline void
 wpas_dbus_signal_p2p_group_started(struct wpa_supplicant *wpa_s,
-				   int client, int persistent)
+				   int client, int persistent,
+				   const u8 *ip)
 {
 }
 
@@ -531,6 +621,15 @@ static inline void wpas_dbus_signal_eap_status(struct wpa_supplicant *wpa_s,
 {
 }
 
+static inline void wpas_dbus_signal_psk_mismatch(struct wpa_supplicant *wpa_s)
+{
+}
+
+static inline void
+wpas_dbus_signal_sae_password_mismatch(struct wpa_supplicant *wpa_s)
+{
+}
+
 static inline
 void wpas_dbus_signal_sta_authorized(struct wpa_supplicant *wpa_s,
 				     const u8 *sta)
@@ -548,6 +647,110 @@ void wpas_dbus_signal_p2p_invitation_received(struct wpa_supplicant *wpa_s,
 					      const u8 *sa, const u8 *dev_addr,
 					      const u8 *bssid, int id,
 					      int op_freq)
+{
+}
+
+static inline
+void wpas_dbus_signal_p2p_bootstrap_req(struct wpa_supplicant *wpa_s,
+					const u8 *src, u16 bootstrap_method)
+{
+}
+
+static inline
+void wpas_dbus_signal_p2p_bootstrap_rsp(struct wpa_supplicant *wpa_s,
+					const u8 *src, int status,
+					u16 bootstrap_method)
+{
+}
+
+static inline
+void wpas_dbus_signal_mesh_group_started(struct wpa_supplicant *wpa_s,
+					 struct wpa_ssid *ssid)
+{
+}
+
+static inline
+void wpas_dbus_signal_mesh_group_removed(struct wpa_supplicant *wpa_s,
+					 const u8 *meshid, u8 meshid_len,
+					 int reason)
+{
+}
+
+static inline
+void wpas_dbus_signal_mesh_peer_connected(struct wpa_supplicant *wpa_s,
+					  const u8 *peer_addr)
+{
+}
+
+static inline
+void wpas_dbus_signal_mesh_peer_disconnected(struct wpa_supplicant *wpa_s,
+					     const u8 *peer_addr, int reason)
+{
+}
+
+static inline
+void wpas_dbus_signal_interworking_ap_added(struct wpa_supplicant *wpa_s,
+					    struct wpa_bss *bss,
+					    struct wpa_cred *cred,
+					    const char *type, int excluded,
+					    int bh, int bss_load,
+					    int conn_capab)
+{
+}
+
+static inline
+void wpas_dbus_signal_interworking_select_done(struct wpa_supplicant *wpa_s)
+{
+}
+
+static inline
+void wpas_dbus_signal_anqp_query_done(struct wpa_supplicant *wpa_s,
+				      const u8 *dst, const char *result)
+{
+}
+
+static inline
+void wpas_dbus_signal_hs20_t_c_acceptance(struct wpa_supplicant *wpa_s,
+					  const char *url)
+{
+}
+
+static inline void
+wpas_dbus_signal_nan_discovery_result(struct wpa_supplicant *wpa_s,
+				      enum nan_service_protocol_type
+				      srv_proto_type,
+				      int subscribe_id,
+				      int peer_publish_id, const u8 *peer_addr,
+				      bool fsd, bool fsd_gas,
+				      const u8 *ssi, size_t ssi_len)
+{
+}
+
+static inline void
+wpas_dbus_signal_nan_replied(struct wpa_supplicant *wpa_s,
+			     enum nan_service_protocol_type srv_proto_type,
+			     int publish_id, int peer_subscribe_id,
+			     const u8 *peer_addr, const u8 *ssi, size_t ssi_len)
+{
+}
+
+
+static inline void
+wpas_dbus_signal_nan_receive(struct wpa_supplicant *wpa_s,
+			     int id, int peer_id, const u8 *peer_addr,
+			     const u8 *ssi, size_t ssi_len)
+{
+}
+
+static inline void
+wpas_dbus_signal_nan_publish_terminated(struct wpa_supplicant *wpa_s,
+					int publish_id, const char *reason)
+{
+}
+
+static inline void
+wpas_dbus_signal_nan_subscribe_terminated(struct wpa_supplicant *wpa_s,
+					  int subscribe_id, const char *reason)
 {
 }
 

@@ -13,6 +13,10 @@
 #ifdef CONFIG_ACS
 
 enum hostapd_chan_status acs_init(struct hostapd_iface *iface);
+void acs_cleanup(struct hostapd_iface *iface);
+
+#define ACS_SCAN_RETRY_MAX_COUNT	15
+#define ACS_SCAN_RETRY_INTERVAL		5
 
 #else /* CONFIG_ACS */
 
@@ -20,6 +24,10 @@ static inline enum hostapd_chan_status acs_init(struct hostapd_iface *iface)
 {
 	wpa_printf(MSG_ERROR, "ACS was disabled on your build, rebuild hostapd with CONFIG_ACS=y or set channel");
 	return HOSTAPD_CHAN_INVALID;
+}
+
+static inline void acs_cleanup(struct hostapd_iface *iface)
+{
 }
 
 #endif /* CONFIG_ACS */

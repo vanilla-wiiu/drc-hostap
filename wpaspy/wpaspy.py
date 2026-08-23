@@ -21,14 +21,14 @@ class Ctrl:
         self.path = path
         self.port = port
 
-        try:
-            mode = os.stat(path).st_mode
-            if stat.S_ISSOCK(mode):
-                self.udp = False
-            else:
+        self.udp = False
+        if not path.startswith('/'):
+            try:
+                mode = os.stat(path).st_mode
+                if not stat.S_ISSOCK(mode):
+                    self.udp = True
+            except:
                 self.udp = True
-        except:
-            self.udp = True
 
         if not self.udp:
             self.s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
@@ -38,7 +38,7 @@ class Ctrl:
             self.s.bind(self.local)
             try:
                 self.s.connect(self.dest)
-            except Exception, e:
+            except Exception as e:
                 self.s.close()
                 os.unlink(self.local)
                 raise
@@ -52,12 +52,12 @@ class Ctrl:
                     break
                 self.s = socket.socket(af, socktype)
                 self.s.settimeout(5)
-                self.s.sendto("GET_COOKIE", sockaddr)
+                self.s.sendto(b"GET_COOKIE", sockaddr)
                 reply, server = self.s.recvfrom(4096)
                 self.cookie = reply
                 self.port = port
             except:
-                print "connect exception ", path, str(port)
+                print("connect exception ", path, str(port))
                 if self.s != None:
                     self.s.close()
                 raise
@@ -70,7 +70,7 @@ class Ctrl:
         if self.attached:
             try:
                 self.detach()
-            except Exception, e:
+            except Exception as e:
                 # Need to ignore this allow the socket to be closed
                 self.attached = False
                 pass
@@ -81,13 +81,24 @@ class Ctrl:
             self.started = False
 
     def request(self, cmd, timeout=10):
+        if type(cmd) == str:
+            try:
+                cmd2 = cmd.encode()
+                cmd = cmd2
+            except UnicodeDecodeError as e:
+                pass
         if self.udp:
             self.s.sendto(self.cookie + cmd, self.sockaddr)
         else:
             self.s.send(cmd)
         [r, w, e] = select.select([self.s], [], [], timeout)
         if r:
-            return self.s.recv(4096)
+            res = self.s.recv(4096).decode()
+            try:
+                r = str(res)
+            except UnicodeDecodeError as e:
+                r = res
+            return r
         raise Exception("Timeout on waiting response")
 
     def attach(self):
@@ -102,6 +113,9 @@ class Ctrl:
     def detach(self):
         if not self.attached:
             return None
+        if self.s.fileno() == -1:
+            self.attached = False
+            return None
         while self.pending():
             ev = self.recv()
         res = self.request("DETACH")
@@ -114,7 +128,7 @@ class Ctrl:
         if self.attached:
             try:
                 self.detach()
-            except Exception, e:
+            except Exception as e:
                 # Need to ignore this to allow the socket to be closed
                 self.attached = False
         self.request("TERMINATE")
@@ -127,5 +141,9 @@ class Ctrl:
         return False
 
     def recv(self):
-        res = self.s.recv(4096)
-        return res
+        res = self.s.recv(4096).decode()
+        try:
+            r = str(res)
+        except UnicodeDecodeError as e:
+            r = res
+        return r

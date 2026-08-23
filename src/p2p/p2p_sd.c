@@ -79,8 +79,7 @@ struct p2p_sd_query * p2p_pending_sd_req(struct p2p_data *p2p,
 			count++;
 		}
 		if (!q->for_all_peers &&
-		    os_memcmp(q->peer, dev->info.p2p_device_addr, ETH_ALEN) ==
-		    0)
+		    ether_addr_equal(q->peer, dev->info.p2p_device_addr))
 			goto found;
 	}
 
@@ -289,8 +288,7 @@ int p2p_start_sd(struct p2p_data *p2p, struct p2p_device *dev)
 	if (query == NULL)
 		return -1;
 	if (p2p->state == P2P_SEARCH &&
-	    os_memcmp(p2p->sd_query_no_ack, dev->info.p2p_device_addr,
-		      ETH_ALEN) == 0) {
+	    ether_addr_equal(p2p->sd_query_no_ack, dev->info.p2p_device_addr)) {
 		p2p_dbg(p2p, "Do not start Service Discovery with " MACSTR
 			" due to it being the first no-ACK peer in this search iteration",
 			MAC2STR(dev->info.p2p_device_addr));
@@ -426,6 +424,7 @@ void p2p_sd_response(struct p2p_data *p2p, int freq, const u8 *dst,
 {
 	struct wpabuf *resp;
 	size_t max_len;
+	unsigned int wait_time = 200;
 
 	/*
 	 * In the 60 GHz, we have a smaller maximum frame length for management
@@ -460,6 +459,7 @@ void p2p_sd_response(struct p2p_data *p2p, int freq, const u8 *dst,
 					     1, p2p->srv_update_indic, NULL);
 	} else {
 		p2p_dbg(p2p, "SD response fits in initial response");
+		wait_time = 0; /* no more SD frames in the sequence */
 		resp = p2p_build_sd_response(dialog_token,
 					     WLAN_STATUS_SUCCESS, 0,
 					     p2p->srv_update_indic, resp_tlvs);
@@ -470,7 +470,7 @@ void p2p_sd_response(struct p2p_data *p2p, int freq, const u8 *dst,
 	p2p->pending_action_state = P2P_NO_PENDING_ACTION;
 	if (p2p_send_action(p2p, freq, dst, p2p->cfg->dev_addr,
 			    p2p->cfg->dev_addr,
-			    wpabuf_head(resp), wpabuf_len(resp), 200) < 0)
+			    wpabuf_head(resp), wpabuf_len(resp), wait_time) < 0)
 		p2p_dbg(p2p, "Failed to send Action frame");
 
 	wpabuf_free(resp);
@@ -489,11 +489,20 @@ void p2p_rx_gas_initial_resp(struct p2p_data *p2p, const u8 *sa,
 	u16 slen;
 	u16 update_indic;
 
-	if (p2p->state != P2P_SD_DURING_FIND || p2p->sd_peer == NULL ||
-	    os_memcmp(sa, p2p->sd_peer->info.p2p_device_addr, ETH_ALEN) != 0) {
+	if ((p2p->state != P2P_SD_DURING_FIND && p2p->state != P2P_SEARCH) ||
+	    !p2p->sd_peer ||
+	    !ether_addr_equal(sa, p2p->sd_peer->info.p2p_device_addr)) {
 		p2p_dbg(p2p, "Ignore unexpected GAS Initial Response from "
 			MACSTR, MAC2STR(sa));
 		return;
+	}
+	if (p2p->state == P2P_SEARCH) {
+		/* It is possible for the TX status and RX response events to be
+		 * reordered, so assume the request was ACKed if a response is
+		 * received. */
+		p2p_dbg(p2p,
+			"GAS Initial Request had not yet received TX status - process the response anyway");
+		p2p_sd_query_cb(p2p, 1);
 	}
 	p2p->cfg->send_action_done(p2p->cfg->cb_ctx);
 	p2p_clear_timeout(p2p);
@@ -623,6 +632,7 @@ void p2p_rx_gas_comeback_req(struct p2p_data *p2p, const u8 *sa,
 	u8 dialog_token;
 	size_t frag_len, max_len;
 	int more = 0;
+	unsigned int wait_time = 200;
 
 	wpa_hexdump(MSG_DEBUG, "P2P: RX GAS Comeback Request", data, len);
 	if (len < 1)
@@ -639,7 +649,7 @@ void p2p_rx_gas_comeback_req(struct p2p_data *p2p, const u8 *sa,
 		p2p_dbg(p2p, "No pending SD response fragment available");
 		return;
 	}
-	if (os_memcmp(sa, p2p->sd_resp_addr, ETH_ALEN) != 0) {
+	if (!ether_addr_equal(sa, p2p->sd_resp_addr)) {
 		p2p_dbg(p2p, "No pending SD response fragment for " MACSTR,
 			MAC2STR(sa));
 		return;
@@ -675,12 +685,13 @@ void p2p_rx_gas_comeback_req(struct p2p_data *p2p, const u8 *sa,
 		p2p_dbg(p2p, "All fragments of SD response sent");
 		wpabuf_free(p2p->sd_resp);
 		p2p->sd_resp = NULL;
+		wait_time = 0; /* no more SD frames in the sequence */
 	}
 
 	p2p->pending_action_state = P2P_NO_PENDING_ACTION;
 	if (p2p_send_action(p2p, rx_freq, sa, p2p->cfg->dev_addr,
 			    p2p->cfg->dev_addr,
-			    wpabuf_head(resp), wpabuf_len(resp), 200) < 0)
+			    wpabuf_head(resp), wpabuf_len(resp), wait_time) < 0)
 		p2p_dbg(p2p, "Failed to send Action frame");
 
 	wpabuf_free(resp);
@@ -703,7 +714,7 @@ void p2p_rx_gas_comeback_resp(struct p2p_data *p2p, const u8 *sa,
 	wpa_hexdump(MSG_DEBUG, "P2P: RX GAS Comeback Response", data, len);
 
 	if (p2p->state != P2P_SD_DURING_FIND || p2p->sd_peer == NULL ||
-	    os_memcmp(sa, p2p->sd_peer->info.p2p_device_addr, ETH_ALEN) != 0) {
+	    !ether_addr_equal(sa, p2p->sd_peer->info.p2p_device_addr)) {
 		p2p_dbg(p2p, "Ignore unexpected GAS Comeback Response from "
 			MACSTR, MAC2STR(sa));
 		return;

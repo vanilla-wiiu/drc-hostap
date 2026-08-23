@@ -9,6 +9,7 @@
 #include "includes.h"
 
 #include "common.h"
+#include "utils/base64.h"
 #include "crypto/sha256.h"
 #include "crypto/crypto.h"
 #include "crypto/random.h"
@@ -30,6 +31,7 @@ struct eap_aka_data {
 	u8 ck[EAP_AKA_CK_LEN];
 	u8 ik[EAP_AKA_IK_LEN];
 	u8 res[EAP_AKA_RES_MAX_LEN];
+	u8 reauth_mac[EAP_SIM_MAC_LEN];
 	size_t res_len;
 	enum {
 		IDENTITY, CHALLENGE, REAUTH, NOTIFICATION, SUCCESS, FAILURE
@@ -99,7 +101,7 @@ static int eap_aka_check_identity_reauth(struct eap_sm *sm,
 		return 0;
 
 	wpa_printf(MSG_DEBUG, "EAP-AKA: Reauth username '%s'", username);
-	data->reauth = eap_sim_db_get_reauth_entry(sm->eap_sim_db_priv,
+	data->reauth = eap_sim_db_get_reauth_entry(sm->cfg->eap_sim_db_priv,
 						   username);
 	if (data->reauth == NULL) {
 		wpa_printf(MSG_DEBUG, "EAP-AKA: Unknown reauth identity - "
@@ -108,7 +110,29 @@ static int eap_aka_check_identity_reauth(struct eap_sm *sm,
 		return 0;
 	}
 
-	wpa_printf(MSG_DEBUG, "EAP-AKA: Using fast re-authentication");
+	if (data->reauth->counter > sm->cfg->eap_sim_aka_fast_reauth_limit) {
+		wpa_printf(MSG_DEBUG,
+			   "EAP-AKA: Too many fast re-authentication attemps - fall back to full authentication");
+		if (sm->cfg->eap_sim_id & 0x04) {
+			wpa_printf(MSG_DEBUG,
+				   "EAP-AKA: Permanent identity recognized - skip AKA-Identity exchange");
+			os_strlcpy(data->permanent, data->reauth->permanent,
+				   sizeof(data->permanent));
+			os_strlcpy(sm->sim_aka_permanent,
+				   data->reauth->permanent,
+				   sizeof(sm->sim_aka_permanent));
+			eap_sim_db_remove_reauth(sm->cfg->eap_sim_db_priv,
+						 data->reauth);
+			data->reauth = NULL;
+			eap_aka_fullauth(sm, data);
+			return 1;
+		}
+		return 0;
+	}
+
+	wpa_printf(MSG_DEBUG,
+		   "EAP-AKA: Using fast re-authentication (counter=%d)",
+		   data->reauth->counter);
 	os_strlcpy(data->permanent, data->reauth->permanent,
 		   sizeof(data->permanent));
 	data->counter = data->reauth->counter;
@@ -132,10 +156,17 @@ static void eap_aka_check_identity(struct eap_sm *sm,
 				   struct eap_aka_data *data)
 {
 	char *username;
+	const u8 *identity = sm->identity;
+	size_t identity_len = sm->identity_len;
+
+	if (sm->sim_aka_permanent[0]) {
+		identity = (const u8 *) sm->sim_aka_permanent;
+		identity_len = os_strlen(sm->sim_aka_permanent);
+	}
 
 	/* Check if we already know the identity from EAP-Response/Identity */
 
-	username = sim_get_username(sm->identity, sm->identity_len);
+	username = sim_get_username(identity, identity_len);
 	if (username == NULL)
 		return;
 
@@ -148,6 +179,16 @@ static void eap_aka_check_identity(struct eap_sm *sm,
 		return;
 	}
 
+	if (sm->sim_aka_permanent[0] && data->state == IDENTITY) {
+		/* Skip AKA/Identity exchange since the permanent identity
+		 * was recognized. */
+		os_free(username);
+		os_strlcpy(data->permanent, sm->sim_aka_permanent,
+			   sizeof(data->permanent));
+		eap_aka_fullauth(sm, data);
+		return;
+	}
+
 	if ((data->eap_method == EAP_TYPE_AKA_PRIME &&
 	     username[0] == EAP_AKA_PRIME_PSEUDONYM_PREFIX) ||
 	    (data->eap_method == EAP_TYPE_AKA &&
@@ -156,7 +197,7 @@ static void eap_aka_check_identity(struct eap_sm *sm,
 		wpa_printf(MSG_DEBUG, "EAP-AKA: Pseudonym username '%s'",
 			   username);
 		permanent = eap_sim_db_get_permanent(
-			sm->eap_sim_db_priv, username);
+			sm->cfg->eap_sim_db_priv, username);
 		if (permanent == NULL) {
 			os_free(username);
 			wpa_printf(MSG_DEBUG, "EAP-AKA: Unknown pseudonym "
@@ -181,7 +222,7 @@ static void * eap_aka_init(struct eap_sm *sm)
 {
 	struct eap_aka_data *data;
 
-	if (sm->eap_sim_db_priv == NULL) {
+	if (!sm->cfg->eap_sim_db_priv) {
 		wpa_printf(MSG_WARNING, "EAP-AKA: eap_sim_db not configured");
 		return NULL;
 	}
@@ -207,7 +248,7 @@ static void * eap_aka_prime_init(struct eap_sm *sm)
 	/* TODO: make ANID configurable; see 3GPP TS 24.302 */
 	char *network_name = "WLAN";
 
-	if (sm->eap_sim_db_priv == NULL) {
+	if (sm->cfg->eap_sim_db_priv == NULL) {
 		wpa_printf(MSG_WARNING, "EAP-AKA: eap_sim_db not configured");
 		return NULL;
 	}
@@ -392,10 +433,13 @@ static int eap_aka_build_encr(struct eap_sm *sm, struct eap_aka_data *data,
 			      const u8 *nonce_s)
 {
 	os_free(data->next_pseudonym);
-	if (nonce_s == NULL) {
+	if (!(sm->cfg->eap_sim_id & 0x01)) {
+		/* Use of pseudonyms disabled in configuration */
+		data->next_pseudonym = NULL;
+	} else if (!nonce_s) {
 		data->next_pseudonym =
 			eap_sim_db_get_next_pseudonym(
-				sm->eap_sim_db_priv,
+				sm->cfg->eap_sim_db_priv,
 				data->eap_method == EAP_TYPE_AKA_PRIME ?
 				EAP_SIM_DB_AKA_PRIME : EAP_SIM_DB_AKA);
 	} else {
@@ -403,10 +447,13 @@ static int eap_aka_build_encr(struct eap_sm *sm, struct eap_aka_data *data,
 		data->next_pseudonym = NULL;
 	}
 	os_free(data->next_reauth_id);
-	if (data->counter <= EAP_AKA_MAX_FAST_REAUTHS) {
+	if (!(sm->cfg->eap_sim_id & 0x02)) {
+		/* Use of fast reauth disabled in configuration */
+		data->next_reauth_id = NULL;
+	} else if (data->counter <= EAP_AKA_MAX_FAST_REAUTHS) {
 		data->next_reauth_id =
 			eap_sim_db_get_next_reauth_id(
-				sm->eap_sim_db_priv,
+				sm->cfg->eap_sim_db_priv,
 				data->eap_method == EAP_TYPE_AKA_PRIME ?
 				EAP_SIM_DB_AKA_PRIME : EAP_SIM_DB_AKA);
 	} else {
@@ -498,7 +545,7 @@ static struct wpabuf * eap_aka_build_challenge(struct eap_sm *sm,
 
 	eap_aka_add_checkcode(data, msg);
 
-	if (sm->eap_sim_aka_result_ind) {
+	if (sm->cfg->eap_sim_aka_result_ind) {
 		wpa_printf(MSG_DEBUG, "   AT_RESULT_IND");
 		eap_sim_msg_add(msg, EAP_SIM_AT_RESULT_IND, 0, NULL, 0);
 	}
@@ -542,6 +589,7 @@ static struct wpabuf * eap_aka_build_reauth(struct eap_sm *sm,
 					    struct eap_aka_data *data, u8 id)
 {
 	struct eap_sim_msg *msg;
+	struct wpabuf *buf;
 
 	wpa_printf(MSG_DEBUG, "EAP-AKA: Generating Re-authentication");
 
@@ -574,14 +622,23 @@ static struct wpabuf * eap_aka_build_reauth(struct eap_sm *sm,
 
 	eap_aka_add_checkcode(data, msg);
 
-	if (sm->eap_sim_aka_result_ind) {
+	if (sm->cfg->eap_sim_aka_result_ind) {
 		wpa_printf(MSG_DEBUG, "   AT_RESULT_IND");
 		eap_sim_msg_add(msg, EAP_SIM_AT_RESULT_IND, 0, NULL, 0);
 	}
 
 	wpa_printf(MSG_DEBUG, "   AT_MAC");
 	eap_sim_msg_add_mac(msg, EAP_SIM_AT_MAC);
-	return eap_sim_msg_finish(msg, data->eap_method, data->k_aut, NULL, 0);
+	buf = eap_sim_msg_finish(msg, data->eap_method, data->k_aut, NULL, 0);
+
+	/* Remember this MAC before sending it to the peer. This MAC is used for
+	 * Session-Id calculation after receiving response from the peer and
+	 * after all other checks pass. */
+	os_memcpy(data->reauth_mac,
+		  wpabuf_head_u8(buf) + wpabuf_len(buf) - EAP_SIM_MAC_LEN,
+		  EAP_SIM_MAC_LEN);
+
+	return buf;
 }
 
 
@@ -647,8 +704,8 @@ static struct wpabuf * eap_aka_buildReq(struct eap_sm *sm, void *priv, u8 id)
 }
 
 
-static Boolean eap_aka_check(struct eap_sm *sm, void *priv,
-			     struct wpabuf *respData)
+static bool eap_aka_check(struct eap_sm *sm, void *priv,
+			  struct wpabuf *respData)
 {
 	struct eap_aka_data *data = priv;
 	const u8 *pos;
@@ -658,25 +715,25 @@ static Boolean eap_aka_check(struct eap_sm *sm, void *priv,
 			       &len);
 	if (pos == NULL || len < 3) {
 		wpa_printf(MSG_INFO, "EAP-AKA: Invalid frame");
-		return TRUE;
+		return true;
 	}
 
-	return FALSE;
+	return false;
 }
 
 
-static Boolean eap_aka_subtype_ok(struct eap_aka_data *data, u8 subtype)
+static bool eap_aka_subtype_ok(struct eap_aka_data *data, u8 subtype)
 {
 	if (subtype == EAP_AKA_SUBTYPE_CLIENT_ERROR ||
 	    subtype == EAP_AKA_SUBTYPE_AUTHENTICATION_REJECT)
-		return FALSE;
+		return false;
 
 	switch (data->state) {
 	case IDENTITY:
 		if (subtype != EAP_AKA_SUBTYPE_IDENTITY) {
 			wpa_printf(MSG_INFO, "EAP-AKA: Unexpected response "
 				   "subtype %d", subtype);
-			return TRUE;
+			return true;
 		}
 		break;
 	case CHALLENGE:
@@ -684,30 +741,30 @@ static Boolean eap_aka_subtype_ok(struct eap_aka_data *data, u8 subtype)
 		    subtype != EAP_AKA_SUBTYPE_SYNCHRONIZATION_FAILURE) {
 			wpa_printf(MSG_INFO, "EAP-AKA: Unexpected response "
 				   "subtype %d", subtype);
-			return TRUE;
+			return true;
 		}
 		break;
 	case REAUTH:
 		if (subtype != EAP_AKA_SUBTYPE_REAUTHENTICATION) {
 			wpa_printf(MSG_INFO, "EAP-AKA: Unexpected response "
 				   "subtype %d", subtype);
-			return TRUE;
+			return true;
 		}
 		break;
 	case NOTIFICATION:
 		if (subtype != EAP_AKA_SUBTYPE_NOTIFICATION) {
 			wpa_printf(MSG_INFO, "EAP-AKA: Unexpected response "
 				   "subtype %d", subtype);
-			return TRUE;
+			return true;
 		}
 		break;
 	default:
 		wpa_printf(MSG_INFO, "EAP-AKA: Unexpected state (%d) for "
 			   "processing a response", data->state);
-		return TRUE;
+		return true;
 	}
 
-	return FALSE;
+	return false;
 }
 
 
@@ -720,11 +777,8 @@ static void eap_aka_determine_identity(struct eap_sm *sm,
 			  sm->identity, sm->identity_len);
 
 	username = sim_get_username(sm->identity, sm->identity_len);
-	if (username == NULL) {
-		data->notification = EAP_SIM_GENERAL_FAILURE_BEFORE_AUTH;
-		eap_aka_state(data, NOTIFICATION);
-		return;
-	}
+	if (!username)
+		goto fail;
 
 	if (eap_aka_check_identity_reauth(sm, data, username) > 0) {
 		os_free(username);
@@ -750,7 +804,7 @@ static void eap_aka_determine_identity(struct eap_sm *sm,
 		wpa_printf(MSG_DEBUG, "EAP-AKA: Pseudonym username '%s'",
 			   username);
 		permanent = eap_sim_db_get_permanent(
-			sm->eap_sim_db_priv, username);
+			sm->cfg->eap_sim_db_priv, username);
 		os_free(username);
 		if (permanent == NULL) {
 			wpa_printf(MSG_DEBUG, "EAP-AKA: Unknown pseudonym "
@@ -768,16 +822,87 @@ static void eap_aka_determine_identity(struct eap_sm *sm,
 			   username);
 		os_strlcpy(data->permanent, username, sizeof(data->permanent));
 		os_free(username);
+#ifdef CRYPTO_RSA_OAEP_SHA256
+	} else if (sm->identity_len > 1 && sm->identity[0] == '\0') {
+		char *enc_id, *pos, *end;
+		size_t enc_id_len;
+		u8 *decoded_id;
+		size_t decoded_id_len;
+		struct wpabuf *enc, *dec;
+		u8 *new_id;
+
+		os_free(username);
+		if (!sm->cfg->imsi_privacy_key) {
+			wpa_printf(MSG_DEBUG,
+				   "EAP-AKA: Received encrypted identity, but no IMSI privacy key configured to decrypt it");
+			goto fail;
+		}
+
+		enc_id = (char *) &sm->identity[1];
+		end = (char *) &sm->identity[sm->identity_len];
+		for (pos = enc_id; pos < end; pos++) {
+			if (*pos == ',')
+				break;
+		}
+		enc_id_len = pos - enc_id;
+
+		wpa_hexdump_ascii(MSG_DEBUG,
+				  "EAP-AKA: Encrypted permanent identity",
+				  enc_id, enc_id_len);
+		decoded_id = base64_decode(enc_id, enc_id_len, &decoded_id_len);
+		if (!decoded_id) {
+			wpa_printf(MSG_DEBUG,
+				   "EAP-AKA: Could not base64 decode encrypted identity");
+			goto fail;
+		}
+		wpa_hexdump(MSG_DEBUG,
+			    "EAP-AKA: Decoded encrypted permanent identity",
+			    decoded_id, decoded_id_len);
+		enc = wpabuf_alloc_copy(decoded_id, decoded_id_len);
+		os_free(decoded_id);
+		if (!enc)
+			goto fail;
+		dec = crypto_rsa_oaep_sha256_decrypt(sm->cfg->imsi_privacy_key,
+						     enc);
+		wpabuf_free(enc);
+		if (!dec) {
+			wpa_printf(MSG_DEBUG,
+				   "EAP-AKA: Failed to decrypt encrypted identity");
+			goto fail;
+		}
+		wpa_hexdump_ascii(MSG_DEBUG, "EAP-AKA: Decrypted permanent identity",
+				  wpabuf_head(dec), wpabuf_len(dec));
+		username = sim_get_username(wpabuf_head(dec), wpabuf_len(dec));
+		if (!username) {
+			wpabuf_free(dec);
+			goto fail;
+		}
+		new_id = os_memdup(wpabuf_head(dec), wpabuf_len(dec));
+		if (!new_id) {
+			wpabuf_free(dec);
+			goto fail;
+		}
+		os_free(sm->identity);
+		sm->identity = new_id;
+		sm->identity_len = wpabuf_len(dec);
+		wpabuf_free(dec);
+		os_strlcpy(data->permanent, username, sizeof(data->permanent));
+		os_free(username);
+#endif /* CRYPTO_RSA_OAEP_SHA256 */
 	} else {
 		wpa_printf(MSG_DEBUG, "EAP-AKA: Unrecognized username '%s'",
 			   username);
 		os_free(username);
-		data->notification = EAP_SIM_GENERAL_FAILURE_BEFORE_AUTH;
-		eap_aka_state(data, NOTIFICATION);
+		goto fail;
 		return;
 	}
 
 	eap_aka_fullauth(sm, data);
+	return;
+
+fail:
+	data->notification = EAP_SIM_GENERAL_FAILURE_BEFORE_AUTH;
+	eap_aka_state(data, NOTIFICATION);
 }
 
 
@@ -786,7 +911,7 @@ static void eap_aka_fullauth(struct eap_sm *sm, struct eap_aka_data *data)
 	size_t identity_len;
 	int res;
 
-	res = eap_sim_db_get_aka_auth(sm->eap_sim_db_priv, data->permanent,
+	res = eap_sim_db_get_aka_auth(sm->cfg->eap_sim_db_priv, data->permanent,
 				      data->rand, data->autn, data->ik,
 				      data->ck, data->res, &data->res_len, sm);
 	if (res == EAP_SIM_DB_PENDING) {
@@ -795,6 +920,10 @@ static void eap_aka_fullauth(struct eap_sm *sm, struct eap_aka_data *data)
 		sm->method_pending = METHOD_PENDING_WAIT;
 		return;
 	}
+
+	if (data->permanent[0] == EAP_AKA_PERMANENT_PREFIX ||
+	    data->permanent[0] == EAP_AKA_PRIME_PERMANENT_PREFIX)
+		os_strlcpy(sm->imsi, &data->permanent[1], sizeof(sm->imsi));
 
 #ifdef EAP_SERVER_AKA_PRIME
 	if (data->eap_method == EAP_TYPE_AKA_PRIME) {
@@ -977,7 +1106,7 @@ static void eap_aka_process_challenge(struct eap_sm *sm,
 
 	wpa_printf(MSG_DEBUG, "EAP-AKA: Challenge response includes the "
 		   "correct AT_MAC");
-	if (sm->eap_sim_aka_result_ind && attr->result_ind) {
+	if (sm->cfg->eap_sim_aka_result_ind && attr->result_ind) {
 		data->use_result_ind = 1;
 		data->notification = EAP_SIM_SUCCESS;
 		eap_aka_state(data, NOTIFICATION);
@@ -985,14 +1114,15 @@ static void eap_aka_process_challenge(struct eap_sm *sm,
 		eap_aka_state(data, SUCCESS);
 
 	if (data->next_pseudonym) {
-		eap_sim_db_add_pseudonym(sm->eap_sim_db_priv, data->permanent,
+		eap_sim_db_add_pseudonym(sm->cfg->eap_sim_db_priv,
+					 data->permanent,
 					 data->next_pseudonym);
 		data->next_pseudonym = NULL;
 	}
 	if (data->next_reauth_id) {
 		if (data->eap_method == EAP_TYPE_AKA_PRIME) {
 #ifdef EAP_SERVER_AKA_PRIME
-			eap_sim_db_add_reauth_prime(sm->eap_sim_db_priv,
+			eap_sim_db_add_reauth_prime(sm->cfg->eap_sim_db_priv,
 						    data->permanent,
 						    data->next_reauth_id,
 						    data->counter + 1,
@@ -1000,7 +1130,7 @@ static void eap_aka_process_challenge(struct eap_sm *sm,
 						    data->k_re);
 #endif /* EAP_SERVER_AKA_PRIME */
 		} else {
-			eap_sim_db_add_reauth(sm->eap_sim_db_priv,
+			eap_sim_db_add_reauth(sm->cfg->eap_sim_db_priv,
 					      data->permanent,
 					      data->next_reauth_id,
 					      data->counter + 1,
@@ -1030,7 +1160,7 @@ static void eap_aka_process_sync_failure(struct eap_sm *sm,
 	 * maintaining a local flag stating whether this AUTS has already been
 	 * reported. */
 	if (!data->auts_reported &&
-	    eap_sim_db_resynchronize(sm->eap_sim_db_priv, data->permanent,
+	    eap_sim_db_resynchronize(sm->cfg->eap_sim_db_priv, data->permanent,
 				     attr->auts, data->rand)) {
 		wpa_printf(MSG_WARNING, "EAP-AKA: Resynchronization failed");
 		data->notification = EAP_SIM_GENERAL_FAILURE_BEFORE_AUTH;
@@ -1097,7 +1227,7 @@ static void eap_aka_process_reauth(struct eap_sm *sm,
 		return;
 	}
 
-	if (sm->eap_sim_aka_result_ind && attr->result_ind) {
+	if (sm->cfg->eap_sim_aka_result_ind && attr->result_ind) {
 		data->use_result_ind = 1;
 		data->notification = EAP_SIM_SUCCESS;
 		eap_aka_state(data, NOTIFICATION);
@@ -1107,7 +1237,7 @@ static void eap_aka_process_reauth(struct eap_sm *sm,
 	if (data->next_reauth_id) {
 		if (data->eap_method == EAP_TYPE_AKA_PRIME) {
 #ifdef EAP_SERVER_AKA_PRIME
-			eap_sim_db_add_reauth_prime(sm->eap_sim_db_priv,
+			eap_sim_db_add_reauth_prime(sm->cfg->eap_sim_db_priv,
 						    data->permanent,
 						    data->next_reauth_id,
 						    data->counter + 1,
@@ -1115,7 +1245,7 @@ static void eap_aka_process_reauth(struct eap_sm *sm,
 						    data->k_re);
 #endif /* EAP_SERVER_AKA_PRIME */
 		} else {
-			eap_sim_db_add_reauth(sm->eap_sim_db_priv,
+			eap_sim_db_add_reauth(sm->cfg->eap_sim_db_priv,
 					      data->permanent,
 					      data->next_reauth_id,
 					      data->counter + 1,
@@ -1123,7 +1253,8 @@ static void eap_aka_process_reauth(struct eap_sm *sm,
 		}
 		data->next_reauth_id = NULL;
 	} else {
-		eap_sim_db_remove_reauth(sm->eap_sim_db_priv, data->reauth);
+		eap_sim_db_remove_reauth(sm->cfg->eap_sim_db_priv,
+					 data->reauth);
 		data->reauth = NULL;
 	}
 
@@ -1132,7 +1263,7 @@ static void eap_aka_process_reauth(struct eap_sm *sm,
 fail:
 	data->notification = EAP_SIM_GENERAL_FAILURE_BEFORE_AUTH;
 	eap_aka_state(data, NOTIFICATION);
-	eap_sim_db_remove_reauth(sm->eap_sim_db_priv, data->reauth);
+	eap_sim_db_remove_reauth(sm->cfg->eap_sim_db_priv, data->reauth);
 	data->reauth = NULL;
 	os_free(decrypted);
 }
@@ -1246,7 +1377,7 @@ static void eap_aka_process(struct eap_sm *sm, void *priv,
 }
 
 
-static Boolean eap_aka_isDone(struct eap_sm *sm, void *priv)
+static bool eap_aka_isDone(struct eap_sm *sm, void *priv)
 {
 	struct eap_aka_data *data = priv;
 	return data->state == SUCCESS || data->state == FAILURE;
@@ -1261,10 +1392,9 @@ static u8 * eap_aka_getKey(struct eap_sm *sm, void *priv, size_t *len)
 	if (data->state != SUCCESS)
 		return NULL;
 
-	key = os_malloc(EAP_SIM_KEYING_DATA_LEN);
+	key = os_memdup(data->msk, EAP_SIM_KEYING_DATA_LEN);
 	if (key == NULL)
 		return NULL;
-	os_memcpy(key, data->msk, EAP_SIM_KEYING_DATA_LEN);
 	*len = EAP_SIM_KEYING_DATA_LEN;
 	return key;
 }
@@ -1278,16 +1408,15 @@ static u8 * eap_aka_get_emsk(struct eap_sm *sm, void *priv, size_t *len)
 	if (data->state != SUCCESS)
 		return NULL;
 
-	key = os_malloc(EAP_EMSK_LEN);
+	key = os_memdup(data->emsk, EAP_EMSK_LEN);
 	if (key == NULL)
 		return NULL;
-	os_memcpy(key, data->emsk, EAP_EMSK_LEN);
 	*len = EAP_EMSK_LEN;
 	return key;
 }
 
 
-static Boolean eap_aka_isSuccess(struct eap_sm *sm, void *priv)
+static bool eap_aka_isSuccess(struct eap_sm *sm, void *priv)
 {
 	struct eap_aka_data *data = priv;
 	return data->state == SUCCESS;
@@ -1302,14 +1431,24 @@ static u8 * eap_aka_get_session_id(struct eap_sm *sm, void *priv, size_t *len)
 	if (data->state != SUCCESS)
 		return NULL;
 
-	*len = 1 + EAP_AKA_RAND_LEN + EAP_AKA_AUTN_LEN;
+	if (!data->reauth)
+		*len = 1 + EAP_AKA_RAND_LEN + EAP_AKA_AUTN_LEN;
+	else
+		*len = 1 + EAP_SIM_NONCE_S_LEN + EAP_SIM_MAC_LEN;
 	id = os_malloc(*len);
 	if (id == NULL)
 		return NULL;
 
 	id[0] = data->eap_method;
-	os_memcpy(id + 1, data->rand, EAP_AKA_RAND_LEN);
-	os_memcpy(id + 1 + EAP_AKA_RAND_LEN, data->autn, EAP_AKA_AUTN_LEN);
+	if (!data->reauth) {
+		os_memcpy(id + 1, data->rand, EAP_AKA_RAND_LEN);
+		os_memcpy(id + 1 + EAP_AKA_RAND_LEN, data->autn,
+			  EAP_AKA_AUTN_LEN);
+	} else {
+		os_memcpy(id + 1, data->nonce_s, EAP_SIM_NONCE_S_LEN);
+		os_memcpy(id + 1 + EAP_SIM_NONCE_S_LEN, data->reauth_mac,
+			  EAP_SIM_MAC_LEN);
+	}
 	wpa_hexdump(MSG_DEBUG, "EAP-AKA: Derived Session-Id", id, *len);
 
 	return id;

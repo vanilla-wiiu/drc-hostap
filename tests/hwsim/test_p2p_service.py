@@ -7,6 +7,7 @@
 from remotehost import remote_compatible
 import logging
 logger = logging.getLogger()
+import os
 import time
 import uuid
 
@@ -47,7 +48,7 @@ def run_sd(dev, dst, query, exp_query=None, fragment=False, query2=None):
 
     ev = dev[0].wait_global_event(["P2P-SERV-DISC-REQ"], timeout=10)
     if ev is None:
-        raise Exception("Service discovery timed out")
+        raise Exception("Service discovery timed out (req)")
     if addr1 not in ev:
         raise Exception("Unexpected service discovery request source")
     if exp_query is None:
@@ -57,20 +58,23 @@ def run_sd(dev, dst, query, exp_query=None, fragment=False, query2=None):
 
     if query2:
         ev_list = []
-        for i in range(0, 4):
+        for i in range(10):
             ev = dev[1].wait_global_event(["P2P-SERV-DISC-RESP"], timeout=10)
             if ev is None:
-                raise Exception("Service discovery timed out")
+                if len(ev_list) < 2:
+                    raise Exception("Service discovery timed out (resp2)")
+                break
             if addr0 in ev:
+                logger.debug("Add entry to ev_list")
                 ev_list.append(ev)
-                if len(ev_list) == 2:
+                if len(ev_list) == 8:
                     break
         return ev_list
 
     for i in range(0, 2):
         ev = dev[1].wait_global_event(["P2P-SERV-DISC-RESP"], timeout=10)
         if ev is None:
-            raise Exception("Service discovery timed out")
+            raise Exception("Service discovery timed out (resp)")
         if addr0 in ev:
             break
 
@@ -92,26 +96,26 @@ def run_sd(dev, dst, query, exp_query=None, fragment=False, query2=None):
 def test_p2p_service_discovery(dev):
     """P2P service discovery"""
     addr0 = dev[0].p2p_dev_addr()
-    for dst in [ "00:00:00:00:00:00", addr0 ]:
+    for dst in ["00:00:00:00:00:00", addr0]:
         ev = run_sd(dev, dst, "02000001")
         if "0b5f6166706f766572746370c00c000c01" not in ev:
             raise Exception("Unexpected service discovery response contents (Bonjour)")
         if "496e7465726e6574" not in ev:
             raise Exception("Unexpected service discovery response contents (UPnP)")
 
-    for req in [ "foo 02000001",
-                 addr0,
-                 addr0 + " upnp qq urn:schemas-upnp-org:device:InternetGatewayDevice:1",
-                 addr0 + " upnp 10",
-                 addr0 + " 123",
-                 addr0 + " qq" ]:
+    for req in ["foo 02000001",
+                addr0,
+                addr0 + " upnp qq urn:schemas-upnp-org:device:InternetGatewayDevice:1",
+                addr0 + " upnp 10",
+                addr0 + " 123",
+                addr0 + " qq"]:
         if "FAIL" not in dev[1].global_request("P2P_SERV_DISC_REQ " + req):
             raise Exception("Invalid P2P_SERV_DISC_REQ accepted: " + req)
 
 def test_p2p_service_discovery2(dev):
     """P2P service discovery with one peer having no services"""
     dev[2].p2p_listen()
-    for dst in [ "00:00:00:00:00:00", dev[0].p2p_dev_addr() ]:
+    for dst in ["00:00:00:00:00:00", dev[0].p2p_dev_addr()]:
         ev = run_sd(dev, dst, "02000001")
         if "0b5f6166706f766572746370c00c000c01" not in ev:
             raise Exception("Unexpected service discovery response contents (Bonjour)")
@@ -121,7 +125,7 @@ def test_p2p_service_discovery2(dev):
 def test_p2p_service_discovery3(dev):
     """P2P service discovery for Bonjour with one peer having no services"""
     dev[2].p2p_listen()
-    for dst in [ "00:00:00:00:00:00", dev[0].p2p_dev_addr() ]:
+    for dst in ["00:00:00:00:00:00", dev[0].p2p_dev_addr()]:
         ev = run_sd(dev, dst, "02000101")
         if "0b5f6166706f766572746370c00c000c01" not in ev:
             raise Exception("Unexpected service discovery response contents (Bonjour)")
@@ -129,7 +133,7 @@ def test_p2p_service_discovery3(dev):
 def test_p2p_service_discovery4(dev):
     """P2P service discovery for UPnP with one peer having no services"""
     dev[2].p2p_listen()
-    for dst in [ "00:00:00:00:00:00", dev[0].p2p_dev_addr() ]:
+    for dst in ["00:00:00:00:00:00", dev[0].p2p_dev_addr()]:
         ev = run_sd(dev, dst, "02000201")
         if "496e7465726e6574" not in ev:
             raise Exception("Unexpected service discovery response contents (UPnP)")
@@ -137,28 +141,48 @@ def test_p2p_service_discovery4(dev):
 @remote_compatible
 def test_p2p_service_discovery_multiple_queries(dev):
     """P2P service discovery with multiple queries"""
-    for dst in [ "00:00:00:00:00:00", dev[0].p2p_dev_addr() ]:
+    for dst in ["00:00:00:00:00:00", dev[0].p2p_dev_addr()]:
         ev = run_sd(dev, dst, "02000201", query2="02000101")
-        if "0b5f6166706f766572746370c00c000c01" not in ev[0] + ev[1]:
+        found = False
+        for e in ev:
+            if "0b5f6166706f766572746370c00c000c01" in e:
+                found = True
+                break
+        if not found:
             raise Exception("Unexpected service discovery response contents (Bonjour)")
-        if "496e7465726e6574" not in ev[0] + ev[1]:
+        found = False
+        for e in ev:
+            if "496e7465726e6574" in e:
+                found = True
+                break
+        if not found:
             raise Exception("Unexpected service discovery response contents (UPnP)")
 
 def test_p2p_service_discovery_multiple_queries2(dev):
     """P2P service discovery with multiple queries with one peer having no services"""
     dev[2].p2p_listen()
-    for dst in [ "00:00:00:00:00:00", dev[0].p2p_dev_addr() ]:
+    for dst in ["00:00:00:00:00:00", dev[0].p2p_dev_addr()]:
         ev = run_sd(dev, dst, "02000201", query2="02000101")
-        if "0b5f6166706f766572746370c00c000c01" not in ev[0] + ev[1]:
+        found = False
+        for e in ev:
+            if "0b5f6166706f766572746370c00c000c01" in e:
+                found = True
+                break
+        if not found:
             raise Exception("Unexpected service discovery response contents (Bonjour)")
-        if "496e7465726e6574" not in ev[0] + ev[1]:
+        found = False
+        for e in ev:
+            if "496e7465726e6574" in e:
+                found = True
+                break
+        if not found:
             raise Exception("Unexpected service discovery response contents (UPnP)")
 
 def test_p2p_service_discovery_fragmentation(dev):
     """P2P service discovery with fragmentation"""
-    for dst in [ "00:00:00:00:00:00", dev[0].p2p_dev_addr() ]:
+    for dst in ["00:00:00:00:00:00", dev[0].p2p_dev_addr()]:
         ev = run_sd(dev, dst, "02000001", fragment=True)
-        if not "long response" in ev:
+        if "long response" not in ev:
             if "0b5f6166706f766572746370c00c000c01" not in ev:
                 raise Exception("Unexpected service discovery response contents (Bonjour)")
             if "496e7465726e6574" not in ev:
@@ -276,6 +300,32 @@ def test_p2p_service_discovery_req_cancel(dev):
         raise Exception("Unexpected SD(broadcast) cancel failure")
 
 @remote_compatible
+def test_p2p_service_discovery_from_go(dev):
+    """P2P service discovery initiated from a GO device"""
+    addr0 = dev[0].p2p_dev_addr()
+    addr1 = dev[1].p2p_dev_addr()
+
+    dev[0].p2p_start_go(freq=2412)
+    dev[1].p2p_listen()
+
+    dev[0].global_request("P2P_SERV_DISC_REQ "+ addr1 + " 02000001")
+    if not dev[0].discover_peer(addr1, social=True, force_find=True):
+        raise Exception("Peer " + addr1 + " not found")
+
+    ev = dev[1].wait_global_event(["P2P-SERV-DISC-REQ"], timeout=10)
+    if ev is None:
+        raise Exception("Service discovery timed out")
+    if addr0 not in ev:
+        raise Exception("Unexpected service discovery request source")
+
+    ev = dev[0].wait_global_event(["P2P-SERV-DISC-RESP"], timeout=10)
+    if ev is None:
+        raise Exception("Service discovery timed out")
+    if addr1 not in ev:
+        raise Exception("Unexpected service discovery response source")
+    dev[0].p2p_stop_find()
+
+@remote_compatible
 def test_p2p_service_discovery_go(dev):
     """P2P service discovery from GO"""
     addr0 = dev[0].p2p_dev_addr()
@@ -390,13 +440,13 @@ def _test_p2p_service_discovery_external(dev):
     if ver == ver2:
         raise Exception("Service list version did not change")
 
-    for cmd in [ "%s%s%s%s" % (arg[2], arg[3], arg[4], resp),
-                 "%s %s %s %s" % ("0", arg[3], arg[4], resp),
-                 "%s %s %s %s" % (arg[2], "foo", arg[4], resp),
-                 "%s %s%s%s" % (arg[2], arg[3], arg[4], resp),
-                 "%s %s %s%s" % (arg[2], arg[3], arg[4], resp),
-                 "%s %s %s %s" % (arg[2], arg[3], arg[4], "12345"),
-                 "%s %s %s %s" % (arg[2], arg[3], arg[4], "qq") ]:
+    for cmd in ["%s%s%s%s" % (arg[2], arg[3], arg[4], resp),
+                "%s %s %s %s" % ("0", arg[3], arg[4], resp),
+                "%s %s %s %s" % (arg[2], "foo", arg[4], resp),
+                "%s %s%s%s" % (arg[2], arg[3], arg[4], resp),
+                "%s %s %s%s" % (arg[2], arg[3], arg[4], resp),
+                "%s %s %s %s" % (arg[2], arg[3], arg[4], "12345"),
+                "%s %s %s %s" % (arg[2], arg[3], arg[4], "qq")]:
         if "FAIL" not in dev[0].global_request("P2P_SERV_DISC_RESP " + cmd):
             raise Exception("Invalid P2P_SERV_DISC_RESP accepted: " + cmd)
 
@@ -411,25 +461,25 @@ def test_p2p_service_discovery_external(dev):
 @remote_compatible
 def test_p2p_service_discovery_invalid_commands(dev):
     """P2P service discovery invalid commands"""
-    for cmd in [ "bonjour",
-                 "bonjour 12",
-                 "bonjour 123 12",
-                 "bonjour qq 12",
-                 "bonjour 12 123",
-                 "bonjour 12 qq",
-                 "upnp 10",
-                 "upnp qq uuid:",
-                 "foo bar" ]:
+    for cmd in ["bonjour",
+                "bonjour 12",
+                "bonjour 123 12",
+                "bonjour qq 12",
+                "bonjour 12 123",
+                "bonjour 12 qq",
+                "upnp 10",
+                "upnp qq uuid:",
+                "foo bar"]:
         if "FAIL" not in dev[0].global_request("P2P_SERVICE_ADD " + cmd):
             raise Exception("Invalid P2P_SERVICE_ADD accepted: " + cmd)
 
-    for cmd in [ "bonjour",
-                 "bonjour 123",
-                 "bonjour qq",
-                 "upnp 10",
-                 "upnp  ",
-                 "upnp qq uuid:",
-                 "foo bar" ]:
+    for cmd in ["bonjour",
+                "bonjour 123",
+                "bonjour qq",
+                "upnp 10",
+                "upnp  ",
+                "upnp qq uuid:",
+                "foo bar"]:
         if "FAIL" not in dev[0].global_request("P2P_SERVICE_DEL " + cmd):
             raise Exception("Invalid P2P_SERVICE_DEL accepted: " + cmd)
 
@@ -477,7 +527,7 @@ def test_p2p_service_discovery_peer_not_listening(dev):
     add_bonjour_services(dev[0])
     add_upnp_services(dev[0])
     dev[0].p2p_listen()
-    dev[1].global_request("P2P_FIND 1 type=social")
+    dev[1].global_request("P2P_FIND 4 type=social")
     ev = dev[1].wait_global_event(["P2P-DEVICE-FOUND"], timeout=4)
     if ev is None:
         raise Exception("Peer not found")
@@ -527,3 +577,64 @@ def test_p2p_service_discovery_peer_not_listening2(dev):
     p2p_state = get_p2p_state(dev[1])
     if p2p_state != "IDLE":
         raise Exception("Unexpected p2p_state after P2P_FIND timeout: " + p2p_state)
+
+def test_p2p_service_discovery_restart(dev):
+    """P2P service discovery restarted immediately"""
+    try:
+        _test_p2p_service_discovery_restart(dev)
+    finally:
+        dev[1].global_request("P2P_SET disc_int 1 3 -1")
+
+def _test_p2p_service_discovery_restart(dev):
+    addr0 = dev[0].p2p_dev_addr()
+    addr1 = dev[1].p2p_dev_addr()
+
+    # Use shorter listen interval to keep P2P_FIND loop shorter.
+    dev[1].global_request("P2P_SET disc_int 1 1 10")
+
+    add_bonjour_services(dev[0])
+    #add_upnp_services(dev[0])
+    dev[0].p2p_listen()
+
+    dev[1].global_request("P2P_FLUSH")
+    dev[1].global_request("P2P_SERV_DISC_REQ " + addr0 + " 02000001")
+    if not dev[1].discover_peer(addr0, social=True, force_find=True):
+        raise Exception("Peer " + addr0 + " not found")
+
+    ev = dev[1].wait_global_event(["P2P-SERV-DISC-RESP"], timeout=10)
+    if ev is None:
+        raise Exception("Service discovery timed out")
+
+    # The following P2P_LISTEN operation used to get delayed due to the last
+    # Action frame TX operation in SD Response using wait_time of 200 ms. It is
+    # somewhat difficult to test for this automatically, but the debug log can
+    # be verified to see that the remain-on-channel event for operation arrives
+    # immediately instead of getting delayed 200 ms. We can use a maximum
+    # acceptable time for the SD Response, but need to keep the limit somewhat
+    # high to avoid making this fail under heavy load. Still, it is apparently
+    # possible for this to take about the same amount of time with fixed
+    # implementation every now and then, so run this multiple time and pass the
+    # test if any attempt is fast enough.
+
+    for i in range(20):
+        dev[1].p2p_stop_find()
+        dev[0].p2p_stop_find()
+        time.sleep(0.01)
+        dev[0].p2p_listen()
+
+        dev[1].global_request("P2P_SERV_DISC_REQ " + addr0 + " 02000001")
+        dev[1].p2p_find(social=True)
+        start = os.times()[4]
+        ev = dev[1].wait_global_event(["P2P-SERV-DISC-RESP"], timeout=10)
+        if ev is None:
+            raise Exception("Service discovery timed out")
+        end = os.times()[4]
+        logger.info("Second SD Response in " + str(end - start) + " seconds")
+        if end - start < 0.8:
+            break
+
+    dev[0].p2p_stop_find()
+    dev[1].p2p_stop_find()
+
+    if end - start > 0.8:
+        raise Exception("Unexpectedly slow second SD Response: " + str(end - start) + " seconds")

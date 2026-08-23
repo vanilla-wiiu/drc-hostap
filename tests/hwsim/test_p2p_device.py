@@ -35,7 +35,7 @@ def test_p2p_device_grpform(dev, apdev):
         found = False
         for l in lines:
             try:
-                [name,value] = l.split('=', 1)
+                [name, value] = l.split('=', 1)
                 if name == "wdev_id":
                     found = True
                     break
@@ -169,7 +169,7 @@ def run_p2p_device_nfc_invite(dev, apdev, no_group_iface):
 
 def test_p2p_device_misuses(dev, apdev):
     """cfg80211 P2P Device misuses"""
-    hapd = hostapd.add_ap(apdev[0], { "ssid": "open" })
+    hapd = hostapd.add_ap(apdev[0], {"ssid": "open"})
     with HWSimRadio(use_p2p_device=True) as (radio, iface):
         wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
         wpas.interface_add(iface)
@@ -214,7 +214,7 @@ def test_p2p_device_misuses(dev, apdev):
         time.sleep(1)
         hwsim_utils.test_connectivity(wpas, hapd)
 
-        ev = hapd.wait_event([ "AP-STA-DISCONNECTED" ], timeout=0.1)
+        ev = hapd.wait_event(["AP-STA-DISCONNECTED"], timeout=0.1)
         if ev is not None:
             raise Exception("Unexpected disconnection event received from hostapd")
         ev = wpas.wait_event(["CTRL-EVENT-DISCONNECTED"], timeout=0.1)
@@ -351,13 +351,22 @@ def test_p2p_device_grpform_timeout_go(dev, apdev):
                 del wpas
                 raise HwsimSkip("Did not manage to cancel group formation")
         dev[0].dump_monitor()
-        ev = wpas.wait_global_event(["WPS-SUCCESS"], timeout=10)
+        # There is a race condition on WPS-SUCCESS being reported on the GO
+        # since the P2P_CANCEL command above might actually stop the WPS
+        # exchange before the WSC_Done is sent to the GO and processed there.
+        # It would be possible for the GO to receive a disconnection event
+        # first.
+        ev = wpas.wait_global_event(["WPS-SUCCESS",
+                                     "P2P-GROUP-FORMATION-FAILURE"],
+                                    timeout=30)
         if ev is None:
             raise Exception("WPS did not succeed (GO)")
         dev[0].dump_monitor()
-        ev = wpas.wait_global_event(["P2P-GROUP-FORMATION-FAILURE"], timeout=20)
-        if ev is None:
-            raise Exception("Group formation timeout not seen on GO")
+        if "P2P-GROUP-FORMATION-FAILURE" not in ev:
+            ev = wpas.wait_global_event(["P2P-GROUP-FORMATION-FAILURE"],
+                                        timeout=20)
+            if ev is None:
+                raise Exception("Group formation timeout not seen on GO")
         ev = wpas.wait_global_event(["P2P-GROUP-REMOVED"], timeout=5)
         if ev is None:
             raise Exception("Group removal not seen on GO")
@@ -433,6 +442,29 @@ def test_p2p_device_join_no_group_iface(dev, apdev):
 
         terminate_group(dev[0], wpas)
 
+def test_p2p_device_join_no_group_iface_cancel(dev, apdev):
+    """P2P cancel join-group using cfg80211 P2P Device (no separate group interface)"""
+    with HWSimRadio(use_p2p_device=True) as (radio, iface):
+        wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+        wpas.interface_add(iface)
+        wpas.global_request("SET p2p_no_group_iface 1")
+
+        res = dev[0].p2p_start_go()
+        bssid = dev[0].get_group_status_field('bssid')
+
+        wpas.scan_for_bss(bssid, res['freq'])
+        pin = wpas.wps_read_pin()
+        dev[0].p2p_go_authorize_client(pin)
+        cmd = "P2P_CONNECT %s %s join freq=%s" % (dev[0].p2p_dev_addr(), pin,
+                                                  res['freq'])
+        if "OK" not in wpas.request(cmd):
+            raise Exception("P2P_CONNECT(join) failed")
+        ev = wpas.wait_event(["CTRL-EVENT-SCAN-STARTED"], timeout=1)
+        if "OK" not in wpas.request("P2P_CANCEL"):
+            raise Exception("P2P_CANCEL failed")
+
+        dev[0].remove_group()
+
 def test_p2p_device_persistent_group(dev):
     """P2P persistent group formation and re-invocation with cfg80211 P2P Device"""
     with HWSimRadio(use_p2p_device=True) as (radio, iface):
@@ -504,3 +536,104 @@ def test_p2p_device_conf(dev, apdev):
         p2p_device_group_conf(wpas, dev[0])
         wpas.global_request("SET p2p_no_group_iface 0")
         p2p_device_group_conf(wpas, dev[0])
+
+def test_p2p_device_autogo_chan_switch(dev):
+    """P2P autonomous GO switching channels with cfg80211 P2P Device"""
+    with HWSimRadio(use_p2p_device=True) as (radio, iface):
+        wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+        wpas.interface_add(iface)
+        wpas.global_request("SET p2p_no_group_iface 1")
+        autogo(wpas, freq=2417)
+        connect_cli(wpas, dev[1])
+        res = wpas.group_request("CHAN_SWITCH 5 2422 ht")
+        if "FAIL" in res:
+            # for now, skip test since mac80211_hwsim support is not yet widely
+            # deployed
+            raise HwsimSkip("Assume mac80211_hwsim did not support channel switching")
+        ev = wpas.wait_group_event(["AP-CSA-FINISHED"], timeout=10)
+        if ev is None:
+            raise Exception("CSA finished event timed out")
+        if "freq=2422" not in ev:
+            raise Exception("Unexpected channel in CSA finished event")
+        ev = dev[1].wait_event(["CTRL-EVENT-CHANNEL-SWITCH"], timeout=2)
+        if ev is None:
+            raise Exception("Channel switch not reported on P2P Client")
+        if "freq=2422" not in ev:
+            raise Exception("Unexpected channel in CS event")
+        wpas.dump_monitor()
+        dev[1].dump_monitor()
+        time.sleep(0.1)
+        hwsim_utils.test_connectivity_p2p(wpas, dev[1])
+
+def test_p2p_device_persistent_group_go_bssid(dev):
+    """P2P persistent group re-invocation (go_bssid) with cfg80211 P2P Device"""
+    with HWSimRadio(use_p2p_device=True) as (radio, iface):
+        wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+        wpas.interface_add(iface)
+        wpas.global_request("SET p2p_no_group_iface 0")
+
+        addr0 = dev[0].p2p_dev_addr()
+        addr1 = wpas.p2p_dev_addr()
+        [i_res, r_res] = go_neg_pin_authorized_persistent(i_dev=dev[0],
+                                                          i_intent=15,
+                                                          r_dev=wpas,
+                                                          r_intent=0)
+        bssid = wpas.get_group_status_field("bssid")
+        wpas.remove_group()
+        wpas.dump_monitor()
+
+        wpas.p2p_listen()
+        if not dev[0].discover_peer(addr1, social=True):
+            raise Exception("Peer " + peer + " not found")
+        dev[0].global_request("P2P_INVITE group=" + dev[0].group_ifname + " peer=" + addr1)
+        ev = wpas.wait_global_event(["P2P-INVITATION-RECEIVED"], timeout=10)
+        if ev is None:
+            raise Exception("Timeout on invitation")
+        if "sa=" + addr0 + " persistent=" not in ev:
+            raise Exception("Unexpected invitation event")
+        [event, addr, persistent] = ev.split(' ', 2)
+
+        wpas.p2p_stop_find()
+        time.sleep(1)
+        wpas.dump_monitor()
+        wpas.flush_scan_cache()
+
+        cmd = "P2P_GROUP_ADD " + persistent + " go_bssid=" + bssid
+        if "OK" not in wpas.global_request(cmd):
+            raise Exception("Could not re-start persistent group")
+        ev = wpas.wait_global_event(["P2P-GROUP-STARTED"], timeout=30)
+        if ev is None:
+            raise Exception("Timeout on group restart")
+
+def test_p2p_device_test_dynamic_disable(dev, apdev):
+    """P2P device removal and addition via p2p_disable"""
+    with HWSimRadio(use_p2p_device=True) as (radio, iface):
+        wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+        wpas.interface_add(iface)
+
+        res = dev[0].p2p_start_go()
+        bssid = dev[0].get_group_status_field('bssid')
+
+        wpas.scan_for_bss(bssid, res['freq'])
+        res2 = connect_cli(dev[0], wpas, freq=res['freq'])
+        if not res2['ifname'].startswith('p2p-' + iface):
+            raise Exception("Unexpected group ifname: " + res2['ifname'])
+
+        # connected, disable P2P which will disconnect and remove all interfaces
+        wpas.set("p2p_disabled", "1")
+        interfaces = wpas.request("INTERFACES").split()
+        if len(interfaces) != 1 or interfaces[0] != iface:
+            raise Exception(f'Unexpected interfaces after disablement: {interfaces}')
+
+        wpas.set("p2p_disabled", "0")
+        interfaces = wpas.request("INTERFACES").split()
+        if len(interfaces) != 2:
+            raise Exception(f'Expected two interfaces, got: {interfaces}')
+
+        # connect a second time after re-adding the P2P device
+        wpas.scan_for_bss(bssid, res['freq'])
+        res2 = connect_cli(dev[0], wpas, freq=res['freq'])
+        if not res2['ifname'].startswith('p2p-' + iface):
+            raise Exception("Unexpected group ifname: " + res2['ifname'])
+
+        terminate_group(dev[0], wpas)

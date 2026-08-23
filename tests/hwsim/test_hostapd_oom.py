@@ -10,10 +10,10 @@ logger = logging.getLogger()
 import time
 
 import hostapd
-from utils import HwsimSkip
+from utils import *
 
 def hostapd_oom_loop(apdev, params, start_func="main"):
-    hapd = hostapd.add_ap(apdev[0], { "ssid": "ctrl" })
+    hapd = hostapd.add_ap(apdev[0], {"ssid": "ctrl"})
 
     count = 0
     for i in range(1, 1000):
@@ -35,13 +35,13 @@ def hostapd_oom_loop(apdev, params, start_func="main"):
                 count += 1
                 if count == 5:
                     break
-        except Exception, e:
+        except Exception as e:
             logger.info("Iteration %d - %s" % (i, str(e)))
 
 @remote_compatible
 def test_hostapd_oom_open(dev, apdev):
     """hostapd failing to setup open mode due to OOM"""
-    params = { "ssid": "open" }
+    params = {"ssid": "open"}
     hostapd_oom_loop(apdev, params)
 
 def test_hostapd_oom_wpa2_psk(dev, apdev):
@@ -49,6 +49,22 @@ def test_hostapd_oom_wpa2_psk(dev, apdev):
     params = hostapd.wpa2_params(ssid="test", passphrase="12345678")
     params['wpa_psk_file'] = 'hostapd.wpa_psk'
     hostapd_oom_loop(apdev, params)
+
+    tests = ["hostapd_config_read_wpa_psk", "hostapd_derive_psk"]
+    for t in tests:
+        hapd = hostapd.add_ap(apdev[0], {"ssid": "ctrl"})
+        hapd.request("TEST_ALLOC_FAIL 1:%s" % t)
+        try:
+            hostapd.add_ap(apdev[1], params, timeout=2.5)
+            raise Exception("Unexpected add_ap() success during OOM")
+        except Exception as e:
+            if "Failed to enable hostapd" in str(e):
+                pass
+            else:
+                raise
+        state = hapd.request('GET_ALLOC_FAIL')
+        if state != "0:%s" % t:
+            raise Exception("OOM not triggered")
 
 @remote_compatible
 def test_hostapd_oom_wpa2_eap(dev, apdev):
@@ -109,10 +125,32 @@ def test_hostapd_oom_wpa2_psk_connect(dev, apdev):
                 break
     dev[0].request("SCAN_INTERVAL 5")
 
-def test_hostapd_oom_wpa2_eap_connect(dev, apdev, params):
-    """hostapd failing during WPA2-EAP mode connection due to OOM"""
-    if not params['long']:
-        raise HwsimSkip("Skip test case with long duration due to --long not specified")
+@long_duration_test
+def test_hostapd_oom_wpa2_eap_connect_1(dev, apdev):
+    """hostapd failing during WPA2-EAP mode connection due to OOM (1-50)"""
+    run_hostapd_oom_wpa2_eap_connect(dev, apdev, 1, 50)
+
+@long_duration_test
+def test_hostapd_oom_wpa2_eap_connect_2(dev, apdev):
+    """hostapd failing during WPA2-EAP mode connection due to OOM (51-100)"""
+    run_hostapd_oom_wpa2_eap_connect(dev, apdev, 51, 100)
+
+@long_duration_test
+def test_hostapd_oom_wpa2_eap_connect_3(dev, apdev):
+    """hostapd failing during WPA2-EAP mode connection due to OOM (101-150)"""
+    run_hostapd_oom_wpa2_eap_connect(dev, apdev, 101, 150)
+
+@long_duration_test
+def test_hostapd_oom_wpa2_eap_connect_4(dev, apdev):
+    """hostapd failing during WPA2-EAP mode connection due to OOM (151-200)"""
+    run_hostapd_oom_wpa2_eap_connect(dev, apdev, 151, 200)
+
+@long_duration_test
+def test_hostapd_oom_wpa2_eap_connect_5(dev, apdev):
+    """hostapd failing during WPA2-EAP mode connection due to OOM (201-999)"""
+    run_hostapd_oom_wpa2_eap_connect(dev, apdev, 201, 999)
+
+def run_hostapd_oom_wpa2_eap_connect(dev, apdev, start, end):
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     params['acct_server_addr'] = "127.0.0.1"
     params['acct_server_port'] = "1813"
@@ -121,7 +159,7 @@ def test_hostapd_oom_wpa2_eap_connect(dev, apdev, params):
 
     dev[0].request("SCAN_INTERVAL 1")
     count = 0
-    for i in range(1, 1000):
+    for i in range(start, end + 1):
         logger.info("Iteration %d" % i)
         if "OK" not in hapd.request("TEST_ALLOC_FAIL %d:main" % i):
             raise HwsimSkip("TEST_ALLOC_FAIL not supported")

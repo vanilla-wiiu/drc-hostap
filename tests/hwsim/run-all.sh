@@ -15,7 +15,13 @@ export LOGDIR
 if [ -z "$DBFILE" ]; then
     DB=""
 else
-    DB="-S $DBFILE --commit $(git rev-parse HEAD)"
+    DB="-S $DBFILE"
+    if [ -z "$COMMITID" ]; then
+	COMMITID="$(git rev-parse HEAD)"
+    fi
+    if [ -n "$COMMITID" ]; then
+	DB="$DB --commit $COMMITID"
+    fi
     if [ -n "$BUILD" ]; then
 	DB="$DB -b $BUILD"
     fi
@@ -39,6 +45,7 @@ unset RUN_TEST_ARGS
 unset BUILD
 unset BUILD_ARGS
 unset CODECOV
+unset VM
 while [ "$1" != "" ]; do
 	case $1 in
 		-v | --valgrind | valgrind)
@@ -71,6 +78,12 @@ while [ "$1" != "" ]; do
 		-h | --help)
 			usage
 			;;
+		-V | --vm)
+			shift
+			echo "$0: running inside a VM"
+			VM=VM
+			;;
+
 		*)
 			RUN_TEST_ARGS="$RUN_TEST_ARGS$1 "
 			shift
@@ -108,16 +121,25 @@ if [ ! -z "$BUILD" ]; then
     fi
 fi
 
-if ! ./start.sh $VALGRIND $TRACE channels=$NUM_CH; then
+if ! ./start.sh $VM $VALGRIND $TRACE channels=$NUM_CH; then
 	if ! [ -z "$LOGBASEDIR" ] ; then
 		echo "Could not start test environment" > $LOGDIR/run
 	fi
 	exit 1
 fi
 
-sudo ./run-tests.py -D --logdir "$LOGDIR" $TRACE_ARGS -q $DB $RUN_TEST_ARGS || errors=1
+# Only use sudo if not already root.
+if [ "$(id -u)" != 0 ]; then
+	SUDO=sudo
+else
+	SUDO=
+fi
+${SUDO} env VM=$VM ./run-tests.py -D --logdir "$LOGDIR" $TRACE_ARGS -q $DB $RUN_TEST_ARGS || errors=1
 
 ./stop.sh
+
+ps ax > $LOGDIR/after-stop-ps-ax
+netstat -tnlu > $LOGDIR/after-stop-netstat
 
 if [ ! -z "$VALGRIND" ] ; then
     failures=`grep "ERROR SUMMARY" $LOGDIR/valgrind-* | grep -v " 0 errors" | wc -l`
@@ -125,6 +147,11 @@ if [ ! -z "$VALGRIND" ] ; then
 	echo "Mark as failed due to valgrind errors"
 	errors=1
     fi
+fi
+
+if tail -100 $LOGDIR/auth_serv | grep -q MEMLEAK; then
+    echo "Mark as failed due to authentication server memory leak"
+    errors=1
 fi
 
 if [ ! -z "$CODECOV" ] ; then
@@ -135,7 +162,9 @@ if [ ! -z "$CODECOV" ] ; then
 fi
 
 if [ $errors -gt 0 ]; then
-    tar czf /tmp/hwsim-tests-$DATE-FAILED$SUFFIX.tar.gz $LOGDIR/
+    if [ -z $VM ]; then
+	tar czf /tmp/hwsim-tests-$DATE-FAILED$SUFFIX.tar.gz $LOGDIR/
+    fi
     exit 1
 fi
 

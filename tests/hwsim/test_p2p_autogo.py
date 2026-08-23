@@ -10,6 +10,7 @@ import subprocess
 import logging
 logger = logging.getLogger()
 
+import hostapd
 import hwsim_utils
 import utils
 from utils import HwsimSkip
@@ -140,7 +141,7 @@ def test_autogo_m2d(dev):
     autogo(dev[0], freq=2412)
     go_addr = dev[0].p2p_dev_addr()
 
-    dev[1].request("SET p2p_no_group_iface 0")
+    dev[1].global_request("SET p2p_no_group_iface 0")
     if not dev[1].discover_peer(go_addr, social=True):
         raise Exception("GO " + go_addr + " not found")
     dev[1].dump_monitor()
@@ -231,6 +232,28 @@ def test_autogo_pbc(dev):
     dev[1].p2p_connect_group(dev[0].p2p_dev_addr(), "pbc", timeout=15,
                              social=True)
 
+def test_autogo_pbc_session_overlap(dev, apdev):
+    """P2P autonomous GO and PBC session overlap"""
+    params = {"ssid": "wps", "eap_server": "1", "wps_state": "1"}
+    hapd = hostapd.add_ap(apdev[0], params)
+    hapd.request("WPS_PBC")
+    bssid = hapd.own_addr()
+    time.sleep(0.1)
+
+    dev[0].scan_for_bss(bssid, freq=2412)
+    dev[1].scan_for_bss(bssid, freq=2412)
+
+    dev[1].global_request("SET p2p_no_group_iface 0")
+    autogo(dev[0], freq=2412)
+    if "OK" not in dev[0].group_request("WPS_PBC p2p_dev_addr=" + dev[1].p2p_dev_addr()):
+        raise Exception("WPS_PBC failed")
+    dev[1].p2p_connect_group(dev[0].p2p_dev_addr(), "pbc", timeout=15,
+                             social=True)
+    hapd.disable()
+    remove_group(dev[0], dev[1])
+    dev[0].flush_scan_cache()
+    dev[1].flush_scan_cache()
+
 def test_autogo_tdls(dev):
     """P2P autonomous GO and two clients using TDLS"""
     go = dev[0]
@@ -307,44 +330,75 @@ def test_autogo_legacy(dev):
     status = dev[2].get_status()
     if status['wpa_state'] != 'COMPLETED':
         raise Exception("Not fully connected")
+    dev[0].wait_sta(addr=dev[2].own_addr())
     hwsim_utils.test_connectivity_p2p_sta(dev[1], dev[2])
     dev[2].request("DISCONNECT")
+    dev[2].wait_disconnected()
+    dev[0].wait_sta_disconnect(addr=dev[2].own_addr())
 
     logger.info("Connect legacy non-WPS client")
     dev[2].request("FLUSH")
     dev[2].request("P2P_SET disabled 1")
+    dev[0].dump_monitor()
     dev[2].connect(ssid=res['ssid'], psk=res['passphrase'], proto='RSN',
                    key_mgmt='WPA-PSK', pairwise='CCMP', group='CCMP',
                    scan_freq=res['freq'])
+    dev[0].wait_sta(addr=dev[2].own_addr(), wait_4way_hs=True)
     hwsim_utils.test_connectivity_p2p_sta(dev[1], dev[2])
     dev[2].request("DISCONNECT")
+    dev[2].wait_disconnected()
+    dev[0].wait_sta_disconnect(addr=dev[2].own_addr())
 
     dev[0].remove_group()
     dev[1].wait_go_ending_session()
 
 def test_autogo_chan_switch(dev):
     """P2P autonomous GO switching channels"""
+    run_autogo_chan_switch(dev)
+
+def run_autogo_chan_switch(dev):
     autogo(dev[0], freq=2417)
-    connect_cli(dev[0], dev[1])
-    res = dev[0].request("CHAN_SWITCH 5 2422")
+    connect_cli(dev[0], dev[1], freq=2417)
+    res = dev[0].group_request("CHAN_SWITCH 5 2422 ht")
     if "FAIL" in res:
         # for now, skip test since mac80211_hwsim support is not yet widely
         # deployed
         raise HwsimSkip("Assume mac80211_hwsim did not support channel switching")
-    ev = dev[0].wait_event(["AP-CSA-FINISHED"], timeout=10)
+    ev = dev[0].wait_group_event(["AP-CSA-FINISHED"], timeout=10)
     if ev is None:
         raise Exception("CSA finished event timed out")
     if "freq=2422" not in ev:
-        raise Exception("Unexpected cahnnel in CSA finished event")
+        raise Exception("Unexpected channel in CSA finished event")
+    ev = dev[1].wait_event(["CTRL-EVENT-STARTED-CHANNEL-SWITCH"], timeout=10)
+    if ev is None or "freq=2422" not in ev:
+        raise Exception("Channel switch started event not received on client")
+    ev = dev[1].wait_event(["CTRL-EVENT-CHANNEL-SWITCH"], timeout=10)
+    if ev is None or "freq=2422" not in ev:
+        raise Exception("Channel switch event not received on client")
+    ev = dev[1].wait_event(["CTRL-EVENT-DISCONNECTED"], timeout=0.1)
+    if ev is not None:
+        raise Exception("Unexpected disconnection after channel switch")
     dev[0].dump_monitor()
     dev[1].dump_monitor()
     time.sleep(0.1)
     hwsim_utils.test_connectivity_p2p(dev[0], dev[1])
 
+    # Wait a bit longer as the kernel might disconnect on a malformed beacon
+    time.sleep(0.5)
+    hwsim_utils.test_connectivity_p2p(dev[0], dev[1])
+
+    dev[0].remove_group()
+    dev[1].wait_go_ending_session()
+
+def test_autogo_chan_switch_group_iface(dev):
+    """P2P autonomous GO switching channels (separate group interface)"""
+    dev[0].global_request("SET p2p_no_group_iface 0")
+    run_autogo_chan_switch(dev)
+
 @remote_compatible
 def test_autogo_extra_cred(dev):
     """P2P autonomous GO sending two WPS credentials"""
-    if "FAIL" in dev[0].request("SET wps_testing_dummy_cred 1"):
+    if "FAIL" in dev[0].request("SET wps_testing_stub_cred 1"):
         raise Exception("Failed to enable test mode")
     autogo(dev[0], freq=2412)
     connect_cli(dev[0], dev[1], social=True, freq=2412)
@@ -403,10 +457,13 @@ def test_autogo_passphrase_len(dev):
         dev[2].dump_monitor()
         dev[2].request("WPS_PIN any " + pin)
         dev[2].wait_connected(timeout=30)
+        dev[0].wait_sta(addr=dev[2].own_addr())
         status = dev[2].get_status()
         if status['wpa_state'] != 'COMPLETED':
             raise Exception("Not fully connected")
         dev[2].request("DISCONNECT")
+        dev[2].wait_disconnected()
+        dev[0].wait_sta_disconnect()
 
         logger.info("Connect legacy non-WPS client")
         dev[2].request("FLUSH")
@@ -414,6 +471,12 @@ def test_autogo_passphrase_len(dev):
         dev[2].connect(ssid=res['ssid'], psk=res['passphrase'], proto='RSN',
                        key_mgmt='WPA-PSK', pairwise='CCMP', group='CCMP',
                        scan_freq=res['freq'])
+        dev[0].wait_sta(addr=dev[2].own_addr())
+        ev = dev[0].wait_group_event(["EAPOL-4WAY-HS-COMPLETED"], timeout=5)
+        if ev is None:
+            raise Exception("4-way handshake was not completed")
+        if dev[2].own_addr() not in ev:
+            raise Exception("Unexpected 4-way handshake address: " + ev)
         hwsim_utils.test_connectivity_p2p_sta(dev[1], dev[2])
         dev[2].request("DISCONNECT")
 
@@ -617,7 +680,11 @@ def test_go_search_non_social(dev):
     dev[1].p2p_find(freq=2422)
     ev = dev[1].wait_global_event(["P2P-DEVICE-FOUND"], timeout=3.5)
     if ev is None:
-        raise Exception("Did not find GO quickly enough")
+        dev[1].p2p_stop_find()
+        dev[1].p2p_find(freq=2422)
+        ev = dev[1].wait_global_event(["P2P-DEVICE-FOUND"], timeout=3.5)
+        if ev is None:
+            raise Exception("Did not find GO quickly enough")
     dev[2].p2p_listen()
     ev = dev[1].wait_global_event(["P2P-DEVICE-FOUND"], timeout=5)
     if ev is None:
@@ -625,6 +692,36 @@ def test_go_search_non_social(dev):
     dev[2].p2p_stop_find()
     dev[1].p2p_stop_find()
     dev[0].remove_group()
+
+def test_go_search_non_social2(dev):
+    """P2P_FIND with freq parameter to scan a single channel (2)"""
+    addr0 = dev[0].p2p_dev_addr()
+    dev[1].p2p_find(freq=2422)
+    # Wait for the first p2p_find scan round to complete before starting GO
+    time.sleep(1)
+    autogo(dev[0], freq=2422)
+    # Verify that p2p_find is still scanning the specified frequency
+    ev = dev[1].wait_global_event(["P2P-DEVICE-FOUND"], timeout=5)
+    if ev is None:
+        dev[1].p2p_stop_find()
+        raise Exception("Did not find GO quickly enough")
+    # Verify that p2p_find is scanning the social channels
+    dev[2].p2p_listen()
+    ev = dev[1].wait_global_event(["P2P-DEVICE-FOUND"], timeout=5)
+    if ev is None:
+        raise Exception("Did not find peer")
+    dev[2].p2p_stop_find()
+    dev[1].p2p_stop_find()
+    dev[0].remove_group()
+    dev[1].dump_monitor()
+
+    # Verify that social channel as the specific channel works
+    dev[1].p2p_find(freq=2412)
+    time.sleep(0.5)
+    dev[2].p2p_listen()
+    ev = dev[1].wait_global_event(["P2P-DEVICE-FOUND"], timeout=5)
+    if ev is None:
+        raise Exception("Did not find peer (2)")
 
 def test_autogo_many(dev):
     """P2P autonomous GO with large number of GO instances"""
@@ -701,7 +798,7 @@ def _test_autogo_many_clients(dev):
         raise Exception("Could not find peer (3)")
     dev[1].p2p_stop_find()
 
-    for i in [ name0, name2, name3 ]:
+    for i in [name0, name2, name3]:
         if i not in ev1 and i not in ev2 and i not in ev3:
             raise Exception('name "%s" not found' % i)
 
@@ -721,7 +818,6 @@ def rx_pd_req(dev):
 def test_autogo_scan(dev):
     """P2P autonomous GO and no P2P IE in Probe Response scan results"""
     addr0 = dev[0].p2p_dev_addr()
-    addr1 = dev[1].p2p_dev_addr()
     dev[0].p2p_start_go(freq=2412, persistent=True)
     bssid = dev[0].p2p_interface_addr()
 
@@ -731,9 +827,6 @@ def test_autogo_scan(dev):
     time.sleep(0.1)
     dev[1].flush_scan_cache()
 
-    pin = dev[1].wps_read_pin()
-    dev[0].group_request("WPS_PIN any " + pin)
-
     try:
         dev[1].request("SET p2p_disabled 1")
         dev[1].request("SCAN freq=2412")
@@ -742,6 +835,17 @@ def test_autogo_scan(dev):
             raise Exception("Active scan did not complete")
     finally:
         dev[1].request("SET p2p_disabled 0")
+
+    # When dev[1] has a dedicated P2P Device interface, then p2p_disabled
+    # will remove it. So get the address now and repeat some of the setup.
+    addr1 = dev[1].p2p_dev_addr()
+    pin = dev[1].wps_read_pin()
+    dev[0].group_request("WPS_PIN any " + pin)
+    dev[1].discover_peer(addr0)
+    dev[1].p2p_stop_find()
+    ev = dev[1].wait_global_event(["P2P-FIND-STOPPED"], timeout=2)
+    time.sleep(0.1)
+    dev[1].flush_scan_cache()
 
     for i in range(2):
         dev[1].request("SCAN freq=2412 passive=1")
@@ -813,3 +917,82 @@ def test_autogo_join_before_found(dev):
         raise Exception("Joining the group timed out")
     dev[0].remove_group()
     dev[1].wait_go_ending_session()
+
+def test_autogo_noa(dev):
+    """P2P autonomous GO and NoA"""
+    res = autogo(dev[0])
+    dev[0].group_request("P2P_SET noa 1,5,20")
+    dev[0].group_request("P2P_SET noa 255,10,50")
+
+    # Connect and disconnect legacy STA to check NoA special cases
+    try:
+        dev[1].request("SET p2p_disabled 1")
+        dev[1].connect(ssid=res['ssid'], psk=res['passphrase'], proto='RSN',
+                       key_mgmt='WPA-PSK', pairwise='CCMP', group='CCMP',
+                       scan_freq=res['freq'])
+        dev[0].group_request("P2P_SET noa 255,15,55")
+        dev[1].request("DISCONNECT")
+        dev[1].wait_disconnected()
+    finally:
+        dev[1].request("SET p2p_disabled 0")
+
+    dev[0].group_request("P2P_SET noa 0,0,0")
+
+def test_autogo_interworking(dev):
+    """P2P autonomous GO and Interworking"""
+    try:
+        run_autogo_interworking(dev)
+    finally:
+        dev[0].set("go_interworking", "0")
+
+def run_autogo_interworking(dev):
+    dev[0].global_request("SET go_interworking 1")
+    dev[0].global_request("SET go_access_network_type 1")
+    dev[0].global_request("SET go_internet 1")
+    dev[0].global_request("SET go_venue_group 2")
+    dev[0].global_request("SET go_venue_type 3")
+    res = autogo(dev[0])
+    bssid = dev[0].p2p_interface_addr()
+    dev[1].flush_scan_cache()
+    dev[1].scan_for_bss(bssid, freq=res['freq'])
+    bss = dev[1].get_bss(bssid)
+    dev[0].remove_group()
+    if '6b03110203' not in bss['ie']:
+        raise Exception("Interworking element not seen")
+
+def test_autogo_remove_iface(dev):
+    """P2P autonomous GO and interface being removed"""
+    wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+    wpas.interface_add("wlan5")
+    wpas.global_request("SET p2p_no_group_iface 1")
+    wpas.set("p2p_group_idle", "1")
+    autogo(wpas)
+    wpas.global_request("P2P_SET disallow_freq 5000")
+    time.sleep(0.1)
+    wpas.global_request("INTERFACE_REMOVE " + wpas.ifname)
+    time.sleep(1)
+
+def test_autogo_network_clear(dev, apdev):
+    """P2P autonomous GO and clearing of networking information"""
+    # Add a BSS entry so that the BSS_FLUSH command will find something to do
+    # in wpa_bss_flush_by_age().
+    hapd = hostapd.add_ap(apdev[0], {"ssid": "open"})
+    bssid = hapd.own_addr()
+    dev[0].scan_for_bss(bssid, freq=2412)
+
+    # Start a P2P GO and restart the network as an AP to force reassoc_same_ess
+    # to become 1.
+    autogo(dev[0])
+    dev[0].request("DISCONNECT")
+    dev[0].set_network(0, "mode", "2")
+    dev[0].request("SELECT_NETWORK 0")
+
+    # Test wpas_p2p_group_delete() behavior, i.e., verify that wpa_s->last_ssid
+    # gets cleared.
+    dev[0].remove_group()
+
+    # Verify that wpa_bss_flush_by_age() does not end up dereferencing the
+    # invalid wpa_s->last_ssid value. This is a regression test for an earlier
+    # issue.
+    time.sleep(1)
+    dev[0].request("BSS_FLUSH 1")

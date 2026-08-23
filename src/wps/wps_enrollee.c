@@ -105,6 +105,7 @@ static struct wpabuf * wps_build_m1(struct wps_data *wps)
 {
 	struct wpabuf *msg;
 	u16 config_methods;
+	u8 multi_ap_backhaul_sta = 0;
 
 	if (random_get_bytes(wps->nonce_e, WPS_NONCE_LEN) < 0)
 		return NULL;
@@ -134,6 +135,9 @@ static struct wpabuf * wps_build_m1(struct wps_data *wps)
 				    WPS_CONFIG_PHY_PUSHBUTTON);
 	}
 
+	if (wps->multi_ap_backhaul_sta)
+		multi_ap_backhaul_sta = MULTI_AP_BACKHAUL_STA;
+
 	if (wps_build_version(msg) ||
 	    wps_build_msg_type(msg, WPS_M1) ||
 	    wps_build_uuid_e(msg, wps->uuid_e) ||
@@ -152,7 +156,7 @@ static struct wpabuf * wps_build_m1(struct wps_data *wps)
 	    wps_build_dev_password_id(msg, wps->dev_pw_id) ||
 	    wps_build_config_error(msg, WPS_CFG_NO_ERROR) ||
 	    wps_build_os_version(&wps->wps->dev, msg) ||
-	    wps_build_wfa_ext(msg, 0, NULL, 0) ||
+	    wps_build_wfa_ext(msg, 0, NULL, 0, multi_ap_backhaul_sta) ||
 	    wps_build_vendor_ext_m1(&wps->wps->dev, msg)) {
 		wpabuf_free(msg);
 		return NULL;
@@ -190,7 +194,7 @@ static struct wpabuf * wps_build_m3(struct wps_data *wps)
 	    wps_build_msg_type(msg, WPS_M3) ||
 	    wps_build_registrar_nonce(wps, msg) ||
 	    wps_build_e_hash(wps, msg) ||
-	    wps_build_wfa_ext(msg, 0, NULL, 0) ||
+	    wps_build_wfa_ext(msg, 0, NULL, 0, 0) ||
 	    wps_build_authenticator(wps, msg)) {
 		wpabuf_free(msg);
 		return NULL;
@@ -223,7 +227,7 @@ static struct wpabuf * wps_build_m5(struct wps_data *wps)
 	    wps_build_e_snonce1(wps, plain) ||
 	    wps_build_key_wrap_auth(wps, plain) ||
 	    wps_build_encr_settings(wps, msg, plain) ||
-	    wps_build_wfa_ext(msg, 0, NULL, 0) ||
+	    wps_build_wfa_ext(msg, 0, NULL, 0, 0) ||
 	    wps_build_authenticator(wps, msg)) {
 		wpabuf_clear_free(plain);
 		wpabuf_free(msg);
@@ -393,7 +397,7 @@ static struct wpabuf * wps_build_m7(struct wps_data *wps)
 	    (wps->wps->ap && wps_build_ap_settings(wps, plain)) ||
 	    wps_build_key_wrap_auth(wps, plain) ||
 	    wps_build_encr_settings(wps, msg, plain) ||
-	    wps_build_wfa_ext(msg, 0, NULL, 0) ||
+	    wps_build_wfa_ext(msg, 0, NULL, 0, 0) ||
 	    wps_build_authenticator(wps, msg)) {
 		wpabuf_clear_free(plain);
 		wpabuf_free(msg);
@@ -430,7 +434,7 @@ static struct wpabuf * wps_build_wsc_done(struct wps_data *wps)
 	    wps_build_msg_type(msg, WPS_WSC_DONE) ||
 	    wps_build_enrollee_nonce(wps, msg) ||
 	    wps_build_registrar_nonce(wps, msg) ||
-	    wps_build_wfa_ext(msg, 0, NULL, 0)) {
+	    wps_build_wfa_ext(msg, 0, NULL, 0, 0)) {
 		wpabuf_free(msg);
 		return NULL;
 	}
@@ -711,8 +715,7 @@ static int wps_process_cred_e(struct wps_data *wps, const u8 *cred,
 	    wps_process_cred(&attr, &wps->cred))
 		return -1;
 
-	if (os_memcmp(wps->cred.mac_addr, wps->wps->dev.mac_addr, ETH_ALEN) !=
-	    0) {
+	if (!ether_addr_equal(wps->cred.mac_addr, wps->wps->dev.mac_addr)) {
 		wpa_printf(MSG_DEBUG, "WPS: MAC Address in the Credential ("
 			   MACSTR ") does not match with own address (" MACSTR
 			   ")", MAC2STR(wps->cred.mac_addr),
@@ -811,8 +814,7 @@ static int wps_process_ap_settings_e(struct wps_data *wps,
 	wpa_printf(MSG_INFO, "WPS: Received new AP configuration from "
 		   "Registrar");
 
-	if (os_memcmp(cred.mac_addr, wps->wps->dev.mac_addr, ETH_ALEN) !=
-	    0) {
+	if (!ether_addr_equal(cred.mac_addr, wps->wps->dev.mac_addr)) {
 		wpa_printf(MSG_DEBUG, "WPS: MAC Address in the AP Settings ("
 			   MACSTR ") does not match with own address (" MACSTR
 			   ")", MAC2STR(cred.mac_addr),
@@ -875,6 +877,17 @@ static int wps_process_ap_settings_e(struct wps_data *wps,
 			   "WPAPSK+WPA2PSK");
 		cred.auth_type |= WPS_AUTH_WPA2PSK;
 	}
+
+#ifdef CONFIG_NO_TKIP
+	if (cred.encr_type & WPS_ENCR_TKIP) {
+		wpa_printf(MSG_DEBUG, "WPS: Disable encr_type TKIP");
+		cred.encr_type &= ~WPS_ENCR_TKIP;
+	}
+	if (cred.auth_type & WPS_AUTH_WPAPSK) {
+		wpa_printf(MSG_DEBUG, "WPS: Disable auth_type WPAPSK");
+		cred.auth_type &= ~WPS_AUTH_WPAPSK;
+	}
+#endif /* CONFIG_NO_TKIP */
 
 	if (wps->wps->cred_cb) {
 		cred.cred_attr = wpabuf_head(attrs);

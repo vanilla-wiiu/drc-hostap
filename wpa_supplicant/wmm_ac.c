@@ -87,12 +87,9 @@ static int wmm_ac_add_ts(struct wpa_supplicant *wpa_s, const u8 *addr,
 	}
 
 	/* copy tspec */
-	_tspec = os_malloc(sizeof(*_tspec));
+	_tspec = os_memdup(tspec, sizeof(*_tspec));
 	if (!_tspec)
 		return -1;
-
-	/* store the admitted TSPEC */
-	os_memcpy(_tspec, tspec, sizeof(*_tspec));
 
 	if (dir != WMM_AC_DIR_DOWNLINK) {
 		ret = wpa_drv_add_ts(wpa_s, tsid, addr, up, admitted_time);
@@ -403,7 +400,7 @@ static int wmm_ac_ts_req_is_valid(struct wpa_supplicant *wpa_s,
 
 	req_ac = up_to_ac[params->user_priority];
 
-	/* Requested accesss category must have acm */
+	/* Requested access category must have acm */
 	if (!wpa_s->wmm_ac_assoc_info->ac_params[req_ac].acm) {
 		wpa_printf(MSG_DEBUG, "WMM AC: AC %d is not ACM", req_ac);
 		return 0;
@@ -474,13 +471,8 @@ static int wmm_ac_init(struct wpa_supplicant *wpa_s, const u8 *ies,
 		return -1;
 	}
 
-	if (!ies) {
-		wpa_printf(MSG_ERROR, "WMM AC: Missing IEs");
-		return -1;
-	}
-
-	if (!(wmm_params->info_bitmap & WMM_PARAMS_UAPSD_QUEUES_INFO)) {
-		wpa_printf(MSG_DEBUG, "WMM AC: Missing U-APSD configuration");
+	if (!ies || !(wmm_params->info_bitmap & WMM_PARAMS_UAPSD_QUEUES_INFO)) {
+		/* WMM AC not in use for this connection */
 		return -1;
 	}
 
@@ -525,7 +517,7 @@ static void wmm_ac_deinit(struct wpa_supplicant *wpa_s)
 	for (i = 0; i < WMM_AC_NUM; i++)
 		wmm_ac_del_ts(wpa_s, i, TS_DIR_IDX_ALL);
 
-	/* delete pending add_ts requset */
+	/* delete pending add_ts request */
 	wmm_ac_del_req(wpa_s, 1);
 
 	os_free(wpa_s->wmm_ac_assoc_info);
@@ -686,7 +678,7 @@ static void wmm_ac_handle_addts_resp(struct wpa_supplicant *wpa_s, const u8 *sa,
 	}
 
 	/* make sure the params are the same */
-	if (os_memcmp(req->address, sa, ETH_ALEN) != 0 ||
+	if (!ether_addr_equal(req->address, sa) ||
 	    tsid != wmm_ac_get_tsid(&req->tspec) ||
 	    up != wmm_ac_get_user_priority(&req->tspec) ||
 	    dir != wmm_ac_get_direction(&req->tspec)) {
@@ -763,13 +755,13 @@ void wmm_ac_rx_action(struct wpa_supplicant *wpa_s, const u8 *da,
 	}
 
 	/* WMM AC action frame */
-	if (os_memcmp(da, wpa_s->own_addr, ETH_ALEN) != 0) {
+	if (!ether_addr_equal(da, wpa_s->own_addr)) {
 		wpa_printf(MSG_DEBUG, "WMM AC: frame destination addr="MACSTR
 			   " is other than ours, ignoring frame", MAC2STR(da));
 		return;
 	}
 
-	if (os_memcmp(sa, wpa_s->bssid, ETH_ALEN) != 0) {
+	if (!ether_addr_equal(sa, wpa_s->bssid)) {
 		wpa_printf(MSG_DEBUG, "WMM AC: ignore frame with sa " MACSTR
 			   " different other than our bssid", MAC2STR(da));
 		return;

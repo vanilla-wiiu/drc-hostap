@@ -21,7 +21,7 @@
  * RFC 2246 Section 9: Mandatory to implement TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA
  * Add support for commonly used cipher suites; don't bother with exportable
  * suites.
- */ 
+ */
 
 static const struct tls_cipher_suite tls_cipher_suites[] = {
 	{ TLS_NULL_WITH_NULL_NULL, TLS_KEY_X_NULL, TLS_CIPHER_NULL,
@@ -76,16 +76,8 @@ static const struct tls_cipher_suite tls_cipher_suites[] = {
 static const struct tls_cipher_data tls_ciphers[] = {
 	{ TLS_CIPHER_NULL,         TLS_CIPHER_STREAM,  0,  0,  0,
 	  CRYPTO_CIPHER_NULL },
-	{ TLS_CIPHER_IDEA_CBC,     TLS_CIPHER_BLOCK,  16, 16,  8,
-	  CRYPTO_CIPHER_NULL },
-	{ TLS_CIPHER_RC2_CBC_40,   TLS_CIPHER_BLOCK,   5, 16,  0,
-	  CRYPTO_CIPHER_ALG_RC2 },
-	{ TLS_CIPHER_RC4_40,       TLS_CIPHER_STREAM,  5, 16,  0,
-	  CRYPTO_CIPHER_ALG_RC4 },
 	{ TLS_CIPHER_RC4_128,      TLS_CIPHER_STREAM, 16, 16,  0,
 	  CRYPTO_CIPHER_ALG_RC4 },
-	{ TLS_CIPHER_DES40_CBC,    TLS_CIPHER_BLOCK,   5,  8,  8,
-	  CRYPTO_CIPHER_ALG_DES },
 	{ TLS_CIPHER_DES_CBC,      TLS_CIPHER_BLOCK,   8,  8,  8,
 	  CRYPTO_CIPHER_ALG_DES },
 	{ TLS_CIPHER_3DES_EDE_CBC, TLS_CIPHER_BLOCK,  24, 24,  8,
@@ -378,7 +370,7 @@ int tlsv12_key_x_server_params_hash(u16 tls_version, u8 hash_alg,
 int tls_key_x_server_params_hash(u16 tls_version, const u8 *client_random,
 				 const u8 *server_random,
 				 const u8 *server_params,
-				 size_t server_params_len, u8 *hash)
+				 size_t server_params_len, u8 *hash, size_t hsz)
 {
 	u8 *hpos;
 	size_t hlen;
@@ -393,6 +385,8 @@ int tls_key_x_server_params_hash(u16 tls_version, const u8 *client_random,
 	crypto_hash_update(ctx, server_random, TLS_RANDOM_LEN);
 	crypto_hash_update(ctx, server_params, server_params_len);
 	hlen = MD5_MAC_LEN;
+	if (hsz < hlen)
+		return -1;
 	if (crypto_hash_finish(ctx, hash, &hlen) < 0)
 		return -1;
 	hpos += hlen;
@@ -403,7 +397,7 @@ int tls_key_x_server_params_hash(u16 tls_version, const u8 *client_random,
 	crypto_hash_update(ctx, client_random, TLS_RANDOM_LEN);
 	crypto_hash_update(ctx, server_random, TLS_RANDOM_LEN);
 	crypto_hash_update(ctx, server_params, server_params_len);
-	hlen = hash + sizeof(hash) - hpos;
+	hlen = hsz - hlen;
 	if (crypto_hash_finish(ctx, hpos, &hlen) < 0)
 		return -1;
 	hpos += hlen;
@@ -482,21 +476,21 @@ int tls_verify_signature(u16 tls_version, struct crypto_public_key *pk,
 		    os_memcmp(buf, "\x30\x31\x30\x0d\x06\x09\x60\x86\x48\x01"
 			      "\x65\x03\x04\x02\x01\x05\x00\x04\x20", 19) == 0)
 		{
-			wpa_printf(MSG_DEBUG, "TLSv1.2: DigestAlgorithn = SHA-256");
+			wpa_printf(MSG_DEBUG, "TLSv1.2: DigestAlgorithm = SHA-256");
 			decrypted = buf + 19;
 			buflen -= 19;
 		} else if (buflen >= 19 + 48 &&
 		    os_memcmp(buf, "\x30\x41\x30\x0d\x06\x09\x60\x86\x48\x01"
 			      "\x65\x03\x04\x02\x02\x05\x00\x04\x30", 19) == 0)
 		{
-			wpa_printf(MSG_DEBUG, "TLSv1.2: DigestAlgorithn = SHA-384");
+			wpa_printf(MSG_DEBUG, "TLSv1.2: DigestAlgorithm = SHA-384");
 			decrypted = buf + 19;
 			buflen -= 19;
 		} else if (buflen >= 19 + 64 &&
 		    os_memcmp(buf, "\x30\x51\x30\x0d\x06\x09\x60\x86\x48\x01"
 			      "\x65\x03\x04\x02\x03\x05\x00\x04\x40", 19) == 0)
 		{
-			wpa_printf(MSG_DEBUG, "TLSv1.2: DigestAlgorithn = SHA-512");
+			wpa_printf(MSG_DEBUG, "TLSv1.2: DigestAlgorithm = SHA-512");
 			decrypted = buf + 19;
 			buflen -= 19;
 

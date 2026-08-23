@@ -92,7 +92,7 @@ def test_p2p_ext_discovery_go(dev):
             raise Exception("Device discovery timed out")
         peer = dev[1].get_peer(addr0)
         if peer['vendor_elems'] != "dd050011223344dd06001122335566":
-            print peer['vendor_elems']
+            logger.info("Peer vendor_elems: " + peer['vendor_elems'])
             raise Exception("Vendor elements not reported correctly")
     finally:
         dev[0].request("VENDOR_ELEM_REMOVE 2 *")
@@ -258,10 +258,18 @@ def _test_p2p_ext_vendor_elem_go_neg_conf(dev, apdev, params):
     if "OK" not in dev[0].request("VENDOR_ELEM_ADD 8 dd050011223305"):
         raise Exception("VENDOR_ELEM_ADD failed")
     dev[0].p2p_listen()
-    dev[1].p2p_listen()
     dev[1].p2p_go_neg_auth(addr0, "12345670", "enter")
+    dev[1].p2p_listen()
     dev[0].p2p_go_neg_init(addr1, "12345678", "display")
+    ev = dev[0].wait_global_event(["P2P-GO-NEG-SUCCESS"], timeout=15)
+    if ev is None:
+        raise Exception("GO negotiation timed out")
+    ev = dev[0].wait_global_event(["P2P-GROUP-FORMATION-FAILURE"], timeout=15)
+    if ev is None:
+        raise Exception("Group formation failure not indicated")
+    dev[0].dump_monitor()
     dev[1].p2p_go_neg_auth_result(expect_failure=True)
+    dev[1].dump_monitor()
 
     out = run_tshark(os.path.join(params['logdir'], "hwsim0.pcapng"),
                      "wifi_p2p.public_action.subtype == 2")
@@ -303,6 +311,9 @@ def _test_p2p_ext_vendor_elem_invitation(dev):
     dev[0].p2p_stop_find()
     dev[1].p2p_stop_find()
 
+    dev[0].dump_monitor()
+    dev[1].dump_monitor()
+
     dev[0].p2p_listen()
     if "FAIL" in dev[1].request("SET ext_mgmt_frame_handling 0"):
         raise Exception("Failed to disable external management frame handling")
@@ -321,6 +332,11 @@ def _test_p2p_ext_vendor_elem_invitation(dev):
             break
     if "dd050011223307" not in ev:
         raise Exception("Vendor element not found from Invitation Response frame")
+    ev = dev[0].wait_global_event(["P2P-GROUP-STARTED"], timeout=5)
+    if ev is None:
+        raise Exception("Group start not reported")
+    dev[0].group_form_result(ev)
+    dev[0].remove_group()
     dev[0].p2p_stop_find()
     dev[1].p2p_stop_find()
 

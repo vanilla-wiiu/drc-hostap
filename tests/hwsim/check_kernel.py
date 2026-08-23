@@ -21,8 +21,8 @@ lockdep_messages = [
   'possible irq lock inversion dependency',
   'suspicious RCU usage',
 ]
-lockdep = r'(\[\s*)?INFO: (%s)' % ('|'.join(lockdep_messages), )
-issue = re.compile('(\[[0-9 .]*\] )?(WARNING:|BUG:|%s|RTNL: assertion failed).*' % lockdep)
+lockdep = r'(\[\s*)?(INFO|WARNING): (%s)|\*\*\* DEADLOCK \*\*\*' % ('|'.join(lockdep_messages), )
+issue = re.compile(r'(\[[0-9 .]*\] )?(WARNING:|BUG:|UBSAN:|%s|RTNL: assertion failed).*' % lockdep)
 
 def check_kernel(logfile):
     for line in open(logfile, 'r'):
