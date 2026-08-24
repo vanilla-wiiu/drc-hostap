@@ -17,6 +17,14 @@
 #include "utils/list.h"
 #include "driver.h"
 
+/*
+ * Even if we apply the CONFIG_TENDONIN patches, we have to use the real OUIs
+ * here because nl80211 will reject non-standard ones.
+ */
+#define NL80211_CIPHER_SUITE_CCMP 0x000fac04
+#define NL80211_CIPHER_SUITE_CCMP_256 0x000fac0a
+#define NL80211_AKM_SUITE_PSK 0x000fac02
+
 #ifndef NL_CAPABILITY_VERSION_3_5_0
 #define nla_nest_start(msg, attrtype) \
 	nla_nest_start(msg, NLA_F_NESTED | (attrtype))

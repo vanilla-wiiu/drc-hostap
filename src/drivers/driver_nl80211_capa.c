@@ -293,7 +293,7 @@ static unsigned int get_akm_suites_info(struct nlattr *tb)
 			key_mgmt |= WPA_DRIVER_CAPA_KEY_MGMT_WPA |
 				WPA_DRIVER_CAPA_KEY_MGMT_WPA2;
 			break;
-		case RSN_AUTH_KEY_MGMT_PSK_OVER_802_1X:
+		case NL80211_AKM_SUITE_PSK:
 			key_mgmt |= WPA_DRIVER_CAPA_KEY_MGMT_WPA_PSK |
 				WPA_DRIVER_CAPA_KEY_MGMT_WPA2_PSK;
 			break;
@@ -470,13 +470,13 @@ static void wiphy_info_cipher_suites(struct wiphy_info_data *info,
 			   c >> 24, (c >> 16) & 0xff,
 			   (c >> 8) & 0xff, c & 0xff);
 		switch (c) {
-		case RSN_CIPHER_SUITE_CCMP_256:
+		case NL80211_CIPHER_SUITE_CCMP_256:
 			info->capa->enc |= WPA_DRIVER_CAPA_ENC_CCMP_256;
 			break;
 		case RSN_CIPHER_SUITE_GCMP_256:
 			info->capa->enc |= WPA_DRIVER_CAPA_ENC_GCMP_256;
 			break;
-		case RSN_CIPHER_SUITE_CCMP:
+		case NL80211_CIPHER_SUITE_CCMP:
 			info->capa->enc |= WPA_DRIVER_CAPA_ENC_CCMP;
 			break;
 		case RSN_CIPHER_SUITE_GCMP:

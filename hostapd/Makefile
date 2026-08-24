@@ -1334,21 +1334,6 @@ ifdef CONFIG_TENDONIN
 CFLAGS += -DCONFIG_TENDONIN
 endif
 
-ALL=hostapd hostapd_cli
-
-all: verify_config $(ALL)
-
-Q=@
-E=echo
-ifeq ($(V), 1)
-Q=
-E=true
-endif
-ifeq ($(QUIET), 1)
-Q=@
-E=true
-endif
-
 ifdef CONFIG_WEP
 CFLAGS += -DCONFIG_WEP
 endif

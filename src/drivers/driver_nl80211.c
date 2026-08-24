@@ -3805,11 +3805,11 @@ static u32 wpa_alg_to_cipher_suite(enum wpa_alg alg, size_t key_len)
 	case WPA_ALG_TKIP:
 		return RSN_CIPHER_SUITE_TKIP;
 	case WPA_ALG_CCMP:
-		return RSN_CIPHER_SUITE_CCMP;
+		return NL80211_CIPHER_SUITE_CCMP;
 	case WPA_ALG_GCMP:
 		return RSN_CIPHER_SUITE_GCMP;
 	case WPA_ALG_CCMP_256:
-		return RSN_CIPHER_SUITE_CCMP_256;
+		return NL80211_CIPHER_SUITE_CCMP_256;
 	case WPA_ALG_GCMP_256:
 		return RSN_CIPHER_SUITE_GCMP_256;
 	case WPA_ALG_BIP_CMAC_128:
@@ -3840,11 +3840,11 @@ static u32 wpa_cipher_to_cipher_suite(unsigned int cipher)
 {
 	switch (cipher) {
 	case WPA_CIPHER_CCMP_256:
-		return RSN_CIPHER_SUITE_CCMP_256;
+		return NL80211_CIPHER_SUITE_CCMP_256;
 	case WPA_CIPHER_GCMP_256:
 		return RSN_CIPHER_SUITE_GCMP_256;
 	case WPA_CIPHER_CCMP:
-		return RSN_CIPHER_SUITE_CCMP;
+		return NL80211_CIPHER_SUITE_CCMP;
 	case WPA_CIPHER_GCMP:
 		return RSN_CIPHER_SUITE_GCMP;
 	case WPA_CIPHER_TKIP:
@@ -3867,11 +3867,11 @@ static int wpa_cipher_to_cipher_suites(unsigned int ciphers, u32 suites[],
 	int num_suites = 0;
 
 	if (num_suites < max_suites && ciphers & WPA_CIPHER_CCMP_256)
-		suites[num_suites++] = RSN_CIPHER_SUITE_CCMP_256;
+		suites[num_suites++] = NL80211_CIPHER_SUITE_CCMP_256;
 	if (num_suites < max_suites && ciphers & WPA_CIPHER_GCMP_256)
 		suites[num_suites++] = RSN_CIPHER_SUITE_GCMP_256;
 	if (num_suites < max_suites && ciphers & WPA_CIPHER_CCMP)
-		suites[num_suites++] = RSN_CIPHER_SUITE_CCMP;
+		suites[num_suites++] = NL80211_CIPHER_SUITE_CCMP;
 	if (num_suites < max_suites && ciphers & WPA_CIPHER_GCMP)
 		suites[num_suites++] = RSN_CIPHER_SUITE_GCMP;
 	if (num_suites < max_suites && ciphers & WPA_CIPHER_TKIP)
@@ -3895,7 +3895,9 @@ static int wpa_key_mgmt_to_suites(unsigned int key_mgmt_suites, u32 suites[],
 	    (key_mgmt_suites & (WPA_KEY_MGMT_ ## a))) \
 		suites[num_suites++] = (RSN_AUTH_KEY_MGMT_ ## b)
 	__AKM(IEEE8021X, UNSPEC_802_1X);
-	__AKM(PSK, PSK_OVER_802_1X);
+	if (num_suites < max_suites &&
+	    (key_mgmt_suites & WPA_KEY_MGMT_PSK))
+		suites[num_suites++] = NL80211_AKM_SUITE_PSK;
 	__AKM(FT_IEEE8021X, FT_802_1X);
 	__AKM(FT_PSK, FT_PSK);
 	__AKM(IEEE8021X_SHA256, 802_1X_SHA256);
@@ -7682,7 +7684,7 @@ static int nl80211_connect_common(struct wpa_driver_nl80211_data *drv,
 		if (!mgmt)
 			return -1;
 
-		mgmt[0] = RSN_AUTH_KEY_MGMT_PSK_OVER_802_1X;
+		mgmt[0] = NL80211_AKM_SUITE_PSK;
 
 		switch (params->key_mgmt_suite) {
 		case WPA_KEY_MGMT_CCKM:
@@ -7750,7 +7752,7 @@ static int nl80211_connect_common(struct wpa_driver_nl80211_data *drv,
 			break;
 		case WPA_KEY_MGMT_PSK:
 		default:
-			mgmt[0] = RSN_AUTH_KEY_MGMT_PSK_OVER_802_1X;
+			mgmt[0] = NL80211_AKM_SUITE_PSK;
 			break;
 		}
 
